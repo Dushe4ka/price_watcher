@@ -51,7 +51,7 @@ PRICE_VALUE_ERROR = (
     'Введите ещё раз!'
 )
 
-MARKETPLACES = ['wildberries', 'ozon']
+MARKETPLACES = ['wildberries', 'ozon', 'yandex_market']
 MARKETPLACE_NOT_ALLOWED_ERROR = (
     'К сожалению Ваш маркетплэйс {current_marketplace} мы обработать '
     'не можем 😱\n'

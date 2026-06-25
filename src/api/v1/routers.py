@@ -1,7 +1,8 @@
 from fastapi import APIRouter
 
-from src.api.v1.endpoints import (media_router, price_history_router,
-                                  track_router, user_router)
+from src.api.v1.endpoints import (deals_router, media_router,
+                                  price_history_router, track_router,
+                                  user_router)
 
 TRACK_TAGS = ['track']
 PRICE_HISTORY_TAGS = ['price_history']
@@ -23,4 +24,7 @@ main_router.include_router(
 )
 main_router.include_router(
     media_router, prefix=MEDIA_PREFIX, tags=MEDIA_TAGS
+)
+main_router.include_router(
+    deals_router
 )

@@ -124,6 +124,8 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
 .venv
 .bot_venv
 .backend_venv
@@ -132,6 +134,18 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.cursor/
+
+# Docker / local data
+docker-compose.override.yml
+
+# Logs and runtime
+*.log
+logs/
 
 # Spyder project settings
 .spyderproject

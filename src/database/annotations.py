@@ -31,3 +31,11 @@ not_null_decimal = Annotated[
     Decimal,
     mapped_column(nullable=False)
 ]
+utc_datetime = Annotated[
+    datetime,
+    mapped_column(type_=TIMESTAMP(timezone=True), nullable=False),
+]
+optional_utc_datetime = Annotated[
+    datetime | None,
+    mapped_column(type_=TIMESTAMP(timezone=True), nullable=True),
+]

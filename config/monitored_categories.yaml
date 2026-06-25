@@ -1,0 +1,96 @@
+categories:
+  - slug: beauty
+    hashtag: beauty
+    name: Бьюти
+    min_discount_percent: 15
+    marketplaces:
+      - marketplace: ozon
+        crawl_url: /category/krasota-i-zdorove-6500/
+      - marketplace: wildberries
+        crawl_url: https://www.wildberries.ru/catalog/krasota
+      - marketplace: yandex_market
+        crawl_url: https://market.yandex.ru/catalog--krasota/54734/list
+
+  - slug: home
+    hashtag: home
+    name: Товары для дома
+    min_discount_percent: 15
+    marketplaces:
+      - marketplace: ozon
+        crawl_url: /category/dom-i-sad-14500/
+      - marketplace: wildberries
+        crawl_url: https://www.wildberries.ru/catalog/dom-i-dacha
+      - marketplace: yandex_market
+        crawl_url: https://market.yandex.ru/catalog--dom-i-dacha/54422/list
+
+  - slug: kids
+    hashtag: kids
+    name: Товары для детей
+    min_discount_percent: 15
+    marketplaces:
+      - marketplace: ozon
+        crawl_url: /category/detskie-tovary-7000/
+      - marketplace: wildberries
+        crawl_url: https://www.wildberries.ru/catalog/detyam
+      - marketplace: yandex_market
+        crawl_url: https://market.yandex.ru/catalog--detskie-tovary/54421/list
+
+  - slug: electronics
+    hashtag: electronics
+    name: Техника и электроника
+    min_discount_percent: 10
+    marketplaces:
+      - marketplace: ozon
+        crawl_url: /category/elektronika-15500/
+      - marketplace: wildberries
+        crawl_url: https://www.wildberries.ru/catalog/elektronika
+      - marketplace: yandex_market
+        crawl_url: https://market.yandex.ru/catalog--elektronika/54440/list
+
+  - slug: clothing
+    hashtag: clothing
+    name: Одежда
+    min_discount_percent: 15
+    marketplaces:
+      - marketplace: ozon
+        crawl_url: /category/odezhda-7500/
+      - marketplace: wildberries
+        crawl_url: https://www.wildberries.ru/catalog/zhenshchinam/odezhda
+      - marketplace: yandex_market
+        crawl_url: https://market.yandex.ru/catalog--odezhda/54432/list
+
+  - slug: shoes
+    hashtag: shoes
+    name: Обувь
+    min_discount_percent: 15
+    marketplaces:
+      - marketplace: ozon
+        crawl_url: /category/obuv-17777/
+      - marketplace: wildberries
+        crawl_url: https://www.wildberries.ru/catalog/obuv
+      - marketplace: yandex_market
+        crawl_url: https://market.yandex.ru/catalog--obuv/54433/list
+
+  - slug: accessories
+    hashtag: accessories
+    name: Аксессуары
+    min_discount_percent: 15
+    marketplaces:
+      - marketplace: ozon
+        crawl_url: /category/aksessuary-7697/
+      - marketplace: wildberries
+        crawl_url: https://www.wildberries.ru/catalog/aksessuary
+      - marketplace: yandex_market
+        crawl_url: https://market.yandex.ru/catalog--aksessuary/54434/list
+
+  - slug: furniture
+    hashtag: furniture
+    name: Мебель
+    min_discount_percent: 15
+    marketplaces:
+      - marketplace: ozon
+        crawl_url: /category/mebel-15000/
+      - marketplace: wildberries
+        crawl_url: https://www.wildberries.ru/catalog/dom/mebel
+      - marketplace: yandex_market
+        crawl_url: https://market.yandex.ru/catalog--mebel/54423/list

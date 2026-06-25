@@ -15,6 +15,7 @@ CONFIRM_TRACK_DELETE = 'confirm_track_delete'
 ADD_TRACK = 'track_add_track'
 WILDBERRIES = 'wildberries'
 OZON = 'ozon'
+YANDEX_MARKET = 'yandex_market'
 CONFIRM_DELETE = 'confirm_delete'
 CANCEL_DELETE = 'cancel_delete'
 

@@ -1,7 +1,10 @@
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.v1.utils import get_wildberries_product_data, wildberries_parse
+from src.api.v1.product_parser import (
+    apply_parsed_product_to_track,
+    fetch_product_data,
+)
 from src.api.v1.validators import (
     check_track_exists_by_id, check_track_with_marketplace_and_article_exists,
     check_unique_track_by_marketplace_article, not_negative_target_price,
@@ -103,21 +106,13 @@ async def create_track(
     track_db_create_schema = TrackDBCreate(
         user_id=user.id, **create_track_schema.model_dump()
     )
-    if create_track_schema.marketplace == Marketplace.WILDBERRIES.value:
-        parsed_data = await wildberries_parse(
-            track_db_create_schema.article
-        )
-        create_track_schema = get_wildberries_product_data(
-            track_db_create_schema, parsed_data
-        )
-    # Добавить условие, если необходимо поддержка нескольких маркетплейсов.
-    else:
-        parsed_data = await wildberries_parse(
-            track_db_create_schema.article
-        )
-        create_track_schema = get_wildberries_product_data(
-            track_db_create_schema, parsed_data
-        )
+    parsed_product = await fetch_product_data(
+        create_track_schema.marketplace,
+        track_db_create_schema.article,
+    )
+    track_db_create_schema = apply_parsed_product_to_track(
+        track_db_create_schema, parsed_product
+    )
     new_track = await track_crud.create(
         track_db_create_schema, session
     )
@@ -163,9 +158,9 @@ async def refresh_data_for_existen_track(
 ):
     """Обновляет данные о товаре (для онлайн режима)."""
     track = await track_crud.get(track_id, session)
-    new_parsed_data = await wildberries_parse(track.article)
-    update_track_schema = get_wildberries_product_data(
-        TrackUpdate(), new_parsed_data
+    parsed_product = await fetch_product_data(track.marketplace, track.article)
+    update_track_schema = apply_parsed_product_to_track(
+        TrackUpdate(), parsed_product
     )
     return await track_crud.update(
         track,

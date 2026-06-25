@@ -1,3 +1,4 @@
+from src.api.v1.endpoints.deals import router as deals_router  # noqa
 from src.api.v1.endpoints.media import router as media_router  # noqa
 from src.api.v1.endpoints.price_history import \
     router as price_history_router  # noqa
