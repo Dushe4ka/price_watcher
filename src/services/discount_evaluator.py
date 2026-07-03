@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.config import settings
 from src.crud.price_tracking import product_price_history_crud
 from src.parsers.base import ParsedProduct
+from src.services.market_price_checker import MarketCheckResult, MarketCheckStatus
 
 
 class DealAction(StrEnum):
@@ -26,6 +27,9 @@ class DiscountDecision:
     parser_discount: int | None
     database_discount: int | None
     average_price: Decimal | None
+    market_min_price: Decimal | None = None
+    market_discount_percent: int | None = None
+    show_market_note: bool = False
 
 
 class DiscountEvaluator:
@@ -138,4 +142,67 @@ class DiscountEvaluator:
             parser_discount=parser_discount,
             database_discount=database_discount,
             average_price=average_price,
+        )
+
+    @staticmethod
+    def apply_market_check(
+        decision: DiscountDecision,
+        market: MarketCheckResult,
+    ) -> DiscountDecision:
+        if not market.required or market.status == MarketCheckStatus.SKIPPED:
+            return decision
+
+        market_fields = {
+            'market_min_price': market.market_min_price,
+            'market_discount_percent': market.market_discount_percent,
+        }
+
+        if market.status == MarketCheckStatus.FAILED:
+            return DiscountDecision(
+                action=DealAction.SKIP,
+                reason=market.reason,
+                parser_discount=decision.parser_discount,
+                database_discount=decision.database_discount,
+                average_price=decision.average_price,
+                **market_fields,
+            )
+
+        if market.status == MarketCheckStatus.INCONCLUSIVE:
+            if decision.action in (DealAction.POST, DealAction.POST_AVERAGE_NOTE):
+                return DiscountDecision(
+                    action=DealAction.MODERATE,
+                    reason=market.reason,
+                    parser_discount=decision.parser_discount,
+                    database_discount=decision.database_discount,
+                    average_price=decision.average_price,
+                    **market_fields,
+                )
+            return DiscountDecision(
+                action=decision.action,
+                reason=decision.reason,
+                parser_discount=decision.parser_discount,
+                database_discount=decision.database_discount,
+                average_price=decision.average_price,
+                **market_fields,
+            )
+
+        show_market_note = market.market_discount_percent is not None
+        if decision.action == DealAction.MODERATE:
+            return DiscountDecision(
+                action=DealAction.POST,
+                reason='parser_discount_market_confirmed',
+                parser_discount=decision.parser_discount,
+                database_discount=decision.database_discount,
+                average_price=decision.average_price,
+                show_market_note=show_market_note,
+                **market_fields,
+            )
+        return DiscountDecision(
+            action=decision.action,
+            reason=decision.reason,
+            parser_discount=decision.parser_discount,
+            database_discount=decision.database_discount,
+            average_price=decision.average_price,
+            show_market_note=show_market_note,
+            **market_fields,
         )

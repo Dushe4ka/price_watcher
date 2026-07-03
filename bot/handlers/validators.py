@@ -26,17 +26,18 @@ NOT_UNIQUE_EMAIL_ERROR = (
     'Придумайте новый'
 )
 
-PASSWORD_PATTERN = r'^\d+$'
-PASSWORD_MIN_LENGTH = 3
-PASSWORD_MAX_LENGTH = 6
+PASSWORD_PATTERN = r'^[\w!@#$%^&*_.-]+$'
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_LENGTH = 64
 WRONG_PASSWORD_LENGTH_ERROR = (
-    'Пароль должен иметь длину не менее {min} '
-    'и не более {max}. 🚫\n'
-    'Ваша длина: {current}.\n'
-    'Введите пароль еще раз:'
+    'Пароль должен быть от <b>{min}</b> до <b>{max}</b> символов. 🚫\n'
+    'Сейчас: {current}.\n'
+    'Введите пароль ещё раз:'
 )
 WRONG_PASSWORD_PATTERN_ERROR = (
-    'Пароль должен содержать только цифры от 1 до 9 🚫'
+    'Пароль может содержать буквы, цифры и символы '
+    '<code>!@#$%^&*_.-</code> 🚫\n'
+    'Введите пароль ещё раз:'
 )
 
 VALIDATE_FULL_NAME_ERROR = 'Недопустимый формат ввода имени и фамилии.'

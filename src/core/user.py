@@ -17,8 +17,11 @@ BEARER_TRANSPORT_TOKEN_URL = 'auth/jwt/login'
 LIFETIME_SECONDS = 3600
 AUTH_BACKEND_NAME = 'jwt'
 
-MIN_PASSWORD_LENGTH = 3
-PASSWORD_LENGTH_ERROR = 'Пароль должен быть длиннее {min_password_length}'
+MIN_PASSWORD_LENGTH = 8
+MAX_PASSWORD_LENGTH = 64
+PASSWORD_LENGTH_ERROR = (
+    'Пароль должен быть от {min_password_length} до {max_password_length} символов'
+)
 PASSWORD_DATA_ERROR = 'Пароль не должен содержать данных о пользователе!'
 
 
@@ -52,7 +55,15 @@ class UserManager(IntegerIDMixin, BaseUserManager[User, int]):
         if len(password) < MIN_PASSWORD_LENGTH:
             raise InvalidPasswordException(
                 reason=PASSWORD_LENGTH_ERROR.format(
-                    min_password_length=MIN_PASSWORD_LENGTH
+                    min_password_length=MIN_PASSWORD_LENGTH,
+                    max_password_length=MAX_PASSWORD_LENGTH,
+                )
+            )
+        if len(password) > MAX_PASSWORD_LENGTH:
+            raise InvalidPasswordException(
+                reason=PASSWORD_LENGTH_ERROR.format(
+                    min_password_length=MIN_PASSWORD_LENGTH,
+                    max_password_length=MAX_PASSWORD_LENGTH,
                 )
             )
         # for user_field in [user.email, user.name, user.surname]:

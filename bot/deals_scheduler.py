@@ -20,7 +20,7 @@ async def run_deals_pipeline(application: Application) -> DealRunStats:
         stats = await pipeline.run(session)
     logger.info(
         'Deals pipeline finished: crawled=%s parsed=%s saved=%s matched=%s '
-        'posted=%s moderation=%s skipped=%s duplicates=%s errors=%s',
+        'posted=%s moderation=%s skipped=%s market=%s duplicates=%s errors=%s',
         stats.crawled,
         stats.parsed,
         stats.prices_saved,
@@ -28,6 +28,7 @@ async def run_deals_pipeline(application: Application) -> DealRunStats:
         stats.posted,
         stats.sent_to_moderation,
         stats.skipped_threshold,
+        stats.skipped_market_check,
         stats.skipped_duplicate,
         stats.errors,
     )

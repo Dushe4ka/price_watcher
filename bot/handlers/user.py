@@ -1,22 +1,23 @@
 from http import HTTPStatus
 
 import aiohttp
-from telegram import InlineKeyboardMarkup, InputFile, Update
+from telegram import InputFile, Update
 from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, ContextTypes, ConversationHandler,
                           MessageHandler)
 
 from bot.endpoints import (ADD_NEW_AVATAR, DELETE_USER_BY_ID, GET_JWT_TOKEN,
-                           REGISTER_USER, USERS_REFRESH_ME)
-from bot.handlers.buttons import (ACCOUNT_SETTINGS_BUTTONS,
-                                  CHECK_ACCOUNT_DATA_BUTTONS, EDIT_BUTTONS,
-                                  FINISH_AUTHORIZATION_BUTTONS,
-                                  FINISH_EDIT_BUTTONS,
-                                  FINISH_REGISTRATION_BUTTONS,
-                                  LOAD_ACCOUNT_DATA)
-from bot.handlers.callback_data import (ACCOUNT_SETTINGS, EDIT_ADD_AVATAR,
-                                        EDIT_EMAIL_CALLBACK,
-                                        EDIT_FULL_NAME_CALLBACK, EDIT_PASSWORD)
+                           GET_USER_BY_TELEGRAM_ID, REGISTER_USER,
+                           USERS_REFRESH_ME)
+from bot.navigation import copy as nav_texts
+from bot.navigation.handlers import cancel_to_menu
+from bot.navigation.keyboards import Keyboards
+from bot.handlers.callback_data import (ACCOUNT_DATA_CB, ACCOUNT_SETTINGS,
+                                        DELETE_ACCOUNT_CB, EDIT_ACCOUNT_CB,
+                                        EDIT_ADD_AVATAR, EDIT_EMAIL_CALLBACK,
+                                        EDIT_FULL_NAME_CALLBACK, EDIT_PASSWORD,
+                                        FINISH_EDIT, LOAD_DATA_CB, MENU,
+                                        START_REGISTRATION)
 from bot.handlers.constants import MESSAGE_HANDLERS, PHOTO_HANDLERS
 from bot.handlers.pre_process import (clear_messages,
                                       load_data_for_register_user)
@@ -48,17 +49,7 @@ EDIT_FINISH_EDIT = 'finish_edit'
 
 # Сообщения для reply_text
 
-ACCOUNT_SETTINGS_MESSAGE = """
-<b>⚙️ Настройки аккаунта</b>
-───────────────
-🔄 <b>/load_data</b> – обновить данные аккаунта
-
-✏️ <b>/edit_account</b> – редактировать аккаунт
-
-🗑️ <b>/delete_account</b> – удалить аккаунт
-
-👤 <b>/account_data</b> – просмотреть данные аккаунта
-"""
+ACCOUNT_SETTINGS_MESSAGE = nav_texts.ACCOUNT_MENU
 
 ACCOUNT_DATA_MESSAGE = """
 <b>👤 Данные аккаунта</b>
@@ -90,7 +81,7 @@ USER_CARD = """
 🔐 <b>JWT:</b> <code>{jwt_token}</code>
 """
 
-LOAD_ACCOUNT_DATA_MESSAGE = 'Данные аккаунта успешно обновлены! ✅'
+LOAD_ACCOUNT_DATA_MESSAGE = nav_texts.LOAD_DATA_SUCCESS
 
 ASK_FULL_NAME = """
 👤 Пожалуйста, введите <b>ваше имя и фамилию</b> через пробел:
@@ -104,7 +95,7 @@ ASK_EMAIL = """
 
 ASK_PASSWORD = """
 🔒 Придумайте <b>безопасный пароль</b>:
-<i>От {min} до {max} символов, состоящий из цифр</i>
+<i>От {min} до {max} символов — буквы, цифры, <code>!@#$%^&*_.-</code></i>
 """
 
 REGISTRATION_SUCCESS = """
@@ -127,19 +118,13 @@ NO_ACCOUNT_LOADED = """
 """
 
 # Для авторизации
-ASK_PASSWORD_AUTH = """
-🔑 Введите <b>ваш пароль</b> для авторизации:
-"""
+ASK_PASSWORD_AUTH = nav_texts.AUTH_PROMPT
 
 INVALID_PASSWORD = """
 ❌ <b>Неверный пароль</b>. Попробуйте ещё раз:
 """
 
-AUTH_SUCCESS = """
-✅ <b>Авторизация прошла успешно!</b>
-
-Выберите действие ниже 👇
-"""
+AUTH_SUCCESS = nav_texts.AUTH_SUCCESS
 
 # Для удаления аккаунта
 ASK_PASSWORD_FOR_DELETE = """
@@ -250,7 +235,39 @@ async def account_settings(
         await get_interaction(update),
         context,
         text=ACCOUNT_SETTINGS_MESSAGE,
-        reply_markup=InlineKeyboardMarkup(ACCOUNT_SETTINGS_BUTTONS)
+        reply_markup=Keyboards.account_menu(),
+    )
+
+
+@clear_messages
+@load_data_for_register_user
+async def reload_account_from_server(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    interaction = await get_interaction(update)
+    if update.message:
+        await update.message.delete()
+    telegram_id = interaction.from_user.id
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            GET_USER_BY_TELEGRAM_ID,
+            json=dict(telegram_id=telegram_id),
+        ) as response:
+            user_data = await response.json()
+            if user_data:
+                jwt_token_data = user_data.pop('jwt_token', None)
+                if jwt_token_data:
+                    from bot.handlers.pre_process import fernet
+                    access_token = fernet.decrypt(
+                        jwt_token_data['access_token'],
+                    ).decode()
+                    user_data['jwt_token'] = access_token
+                context.user_data['account'] = user_data
+    await send_tracked_message(
+        interaction,
+        context,
+        text=LOAD_ACCOUNT_DATA_MESSAGE,
+        reply_markup=Keyboards.account_menu(),
     )
 
 
@@ -259,12 +276,28 @@ async def account_settings(
 async def load_account_data(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    await update.message.delete()
-    await send_tracked_message(
-        update,
-        context,
-        text=LOAD_ACCOUNT_DATA_MESSAGE,
-        reply_markup=InlineKeyboardMarkup(LOAD_ACCOUNT_DATA)
+    await reload_account_from_server(update, context)
+
+
+ACCOUNT_NOT_FOUND = """
+<b>⚠️ Профиль не найден</b>
+
+Аккаунт ещё не создан или данные не загрузились.
+Нажмите «Обновить» или создайте аккаунт.
+"""
+
+
+def _format_account_profile(account: dict) -> str:
+    return ACCOUNT_DATA_MESSAGE.format(
+        name=account.get('name') or '—',
+        surname=account.get('surname') or '—',
+        email=account.get('email') or '—',
+        telegram_id=account.get('telegram_id') or '—',
+        chat_id=account.get('chat_id') or '—',
+        active='✅' if account.get('is_active') else '❌',
+        is_verified='✅' if account.get('is_verified') else '❌',
+        is_superuser='✅' if account.get('is_superuser') else '❌',
+        jwt_token=account.get('jwt_token') or '❌',
     )
 
 
@@ -273,39 +306,37 @@ async def load_account_data(
 async def check_account_data(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    await update.message.delete()
-    account = context.user_data['account']
-    user_data = ACCOUNT_DATA_MESSAGE.format(
-        name=account['name'],
-        surname=account['surname'],
-        email=account['email'],
-        telegram_id=account['telegram_id'],
-        chat_id=account['chat_id'],
-        active='✅' if account['is_active'] else '❌',
-        is_verified='✅' if account['is_verified'] else '❌',
-        is_superuser='✅' if account['is_superuser'] else '❌',
-        jwt_token=account['jwt_token'] if account.get('jwt_token') else '❌'
-    )
+    interaction = await get_interaction(update)
+    if update.message:
+        await update.message.delete()
+    account = context.user_data.get('account', {})
+    if not account.get('id'):
+        await send_tracked_message(
+            interaction,
+            context,
+            text=ACCOUNT_NOT_FOUND,
+            reply_markup=Keyboards.account_menu(),
+        )
+        return
+    user_data = _format_account_profile(account)
     if user_avatar := account.get('media'):
         try:
             with open(user_avatar[-1]['path'], 'rb') as image_file:
                 await send_tracked_photo(
-                    update,
+                    interaction,
                     context,
                     caption=user_data,
                     photo=InputFile(image_file),
-                    reply_markup=InlineKeyboardMarkup(
-                        CHECK_ACCOUNT_DATA_BUTTONS
-                    )
+                    reply_markup=Keyboards.account_profile(),
                 )
         except Exception as error:
             print(f'Не удалось отправить аватар: {str(error)}')
     else:
         await send_tracked_message(
-            update,
+            interaction,
             context,
             text=user_data,
-            reply_markup=InlineKeyboardMarkup(CHECK_ACCOUNT_DATA_BUTTONS)
+            reply_markup=Keyboards.account_profile(),
         )
 
 
@@ -388,9 +419,7 @@ async def select_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         name=user['name'],
                         user_id=user['id']
                     ),
-                    reply_markup=InlineKeyboardMarkup(
-                        FINISH_REGISTRATION_BUTTONS
-                    )
+                    reply_markup=Keyboards.after_registration(),
                 )
             else:
                 detail = await response.json()
@@ -405,7 +434,8 @@ async def get_password_for_authorization(
     await send_tracked_message(
         await get_interaction(update),
         context,
-        text=ASK_PASSWORD_AUTH
+        text=ASK_PASSWORD_AUTH,
+        reply_markup=Keyboards.auth_prompt(),
     )
     return AUTH_AUTHORIZATION
 
@@ -458,9 +488,7 @@ async def authorization(
                     update,
                     context,
                     text=AUTH_SUCCESS,
-                    reply_markup=InlineKeyboardMarkup(
-                        FINISH_AUTHORIZATION_BUTTONS
-                    )
+                    reply_markup=Keyboards.after_auth(),
                 )
                 return ConversationHandler.END
             await update.message.reply_text(
@@ -471,13 +499,17 @@ async def authorization(
 
 
 @clear_messages
+@clear_messages
+@load_data_for_register_user
 async def get_password_for_delete_account(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
+    interaction = await get_interaction(update)
     await send_tracked_message(
-        update,
+        interaction,
         context,
-        text=ASK_PASSWORD_FOR_DELETE
+        text=ASK_PASSWORD_FOR_DELETE,
+        reply_markup=Keyboards.auth_prompt(),
     )
     return DELETE_START_DELETE
 
@@ -515,14 +547,18 @@ async def delete_account(
 
 
 @clear_messages
+@clear_messages
+@load_data_for_register_user
 async def get_password_for_edit_account(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
     context.user_data['edit_account'] = dict()
+    interaction = await get_interaction(update)
     await send_tracked_message(
-        update,
+        interaction,
         context,
-        text=START_EDIT_PASSWORD_PROMPT
+        text=START_EDIT_PASSWORD_PROMPT,
+        reply_markup=Keyboards.auth_prompt(),
     )
     return EDIT_CHOOSE_EDIT_FIELD
 
@@ -549,7 +585,7 @@ async def choose_edit_field(
         interaction,
         context,
         text=CHOOSE_EDIT_FIELD_PROMPT,
-        reply_markup=InlineKeyboardMarkup(EDIT_BUTTONS)
+        reply_markup=Keyboards.edit_profile(),
     )
     return EDIT_START_EDIT_FIELD
 
@@ -614,7 +650,7 @@ async def save_edit_full_name(
         update,
         context,
         text=CHOOSE_EDIT_FIELD_PROMPT,
-        reply_markup=InlineKeyboardMarkup(EDIT_BUTTONS)
+        reply_markup=Keyboards.edit_profile(),
     )
     return EDIT_START_EDIT_FIELD
 
@@ -639,7 +675,7 @@ async def save_edit_email(
         update,
         context,
         text=CHOOSE_EDIT_FIELD_PROMPT,
-        reply_markup=InlineKeyboardMarkup(EDIT_BUTTONS)
+        reply_markup=Keyboards.edit_profile(),
     )
     return EDIT_START_EDIT_FIELD
 
@@ -664,7 +700,7 @@ async def save_edit_password(
         update,
         context,
         text=CHOOSE_EDIT_FIELD_PROMPT,
-        reply_markup=InlineKeyboardMarkup(EDIT_BUTTONS)
+        reply_markup=Keyboards.edit_profile(),
     )
     return EDIT_START_EDIT_FIELD
 
@@ -723,7 +759,7 @@ async def save_avatar(
         update,
         context,
         text=CHOOSE_EDIT_FIELD_PROMPT,
-        reply_markup=InlineKeyboardMarkup(EDIT_BUTTONS)
+        reply_markup=Keyboards.edit_profile(),
     )
     return EDIT_START_EDIT_FIELD
 
@@ -756,9 +792,7 @@ async def finish_edit(
                         jwt_token=new_user_data['jwt_token']['access_token']
                     )
                 ),
-                reply_markup=InlineKeyboardMarkup(
-                    FINISH_EDIT_BUTTONS
-                )
+                reply_markup=Keyboards.after_edit(),
             )
             return ConversationHandler.END
 
@@ -775,100 +809,120 @@ def handlers_installer(
         )
     )
     application.add_handler(
-        CommandHandler('account_data', check_account_data)
+        CommandHandler('account_data', check_account_data),
     )
     application.add_handler(
-        CommandHandler('load_data', load_account_data)
+        CommandHandler('load_data', load_account_data),
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            check_account_data, pattern=f'^{ACCOUNT_DATA_CB}$',
+        ),
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            reload_account_from_server, pattern=f'^{LOAD_DATA_CB}$',
+        ),
     )
     registration_conversation_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(
-                start_registration, pattern='^start_registration$'
-            )
+                start_registration, pattern=f'^{START_REGISTRATION}$',
+            ),
         ],
         states={
             REGISTRATION_FULL_NAME: [
-                MessageHandler(MESSAGE_HANDLERS, select_name)
+                MessageHandler(MESSAGE_HANDLERS, select_name),
             ],
             REGISTRATION_EMAIL: [
-                MessageHandler(MESSAGE_HANDLERS, select_email)
+                MessageHandler(MESSAGE_HANDLERS, select_email),
             ],
             REGISTRATION_PASSWORD: [
-                MessageHandler(MESSAGE_HANDLERS, select_password)
-            ]
+                MessageHandler(MESSAGE_HANDLERS, select_password),
+            ],
         },
         fallbacks=[
-            MessageHandler(MESSAGE_HANDLERS, select_password)
-        ]
+            CallbackQueryHandler(cancel_to_menu, pattern=f'^{MENU}$'),
+            CommandHandler('menu', cancel_to_menu),
+            MessageHandler(MESSAGE_HANDLERS, select_password),
+        ],
     )
     authorization_conversation_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(
-                get_password_for_authorization, pattern='^authorization$'
+                get_password_for_authorization, pattern='^authorization$',
             ),
-            CommandHandler(
-                'auth', get_password_for_authorization
-            )
+            CommandHandler('auth', get_password_for_authorization),
         ],
         states={
             AUTH_AUTHORIZATION: [
-                MessageHandler(MESSAGE_HANDLERS, authorization)
+                MessageHandler(MESSAGE_HANDLERS, authorization),
             ],
             AUTH_GET_PASSWORD: [
-                MessageHandler(
-                    MESSAGE_HANDLERS, get_password_for_authorization
-                )
-            ]
+                MessageHandler(MESSAGE_HANDLERS, get_password_for_authorization),
+            ],
         },
         fallbacks=[
-            MessageHandler(MESSAGE_HANDLERS, authorization)
-        ]
+            CallbackQueryHandler(cancel_to_menu, pattern=f'^{MENU}$'),
+            CommandHandler('menu', cancel_to_menu),
+            MessageHandler(MESSAGE_HANDLERS, authorization),
+        ],
     )
     delete_account_conversation_handler = ConversationHandler(
         entry_points=[
-            CommandHandler(
-                'delete_account', get_password_for_delete_account
-            )
+            CommandHandler('delete_account', get_password_for_delete_account),
+            CallbackQueryHandler(
+                get_password_for_delete_account,
+                pattern=f'^{DELETE_ACCOUNT_CB}$',
+            ),
         ],
         states={
             DELETE_START_DELETE: [
-                MessageHandler(MESSAGE_HANDLERS, delete_account)
-            ]
+                MessageHandler(MESSAGE_HANDLERS, delete_account),
+            ],
         },
         fallbacks=[
-            MessageHandler(MESSAGE_HANDLERS, delete_account)
-        ]
+            CallbackQueryHandler(cancel_to_menu, pattern=f'^{MENU}$'),
+            CommandHandler('menu', cancel_to_menu),
+            MessageHandler(MESSAGE_HANDLERS, delete_account),
+        ],
     )
     edit_account_conversation_handler = ConversationHandler(
         entry_points=[
-            CommandHandler('edit_account', get_password_for_edit_account)
+            CommandHandler('edit_account', get_password_for_edit_account),
+            CallbackQueryHandler(
+                get_password_for_edit_account,
+                pattern=f'^{EDIT_ACCOUNT_CB}$',
+            ),
         ],
         states={
             EDIT_CHOOSE_EDIT_FIELD: [
-                MessageHandler(MESSAGE_HANDLERS, choose_edit_field)
+                MessageHandler(MESSAGE_HANDLERS, choose_edit_field),
             ],
             EDIT_START_EDIT_FIELD: [
-                CallbackQueryHandler(start_edit_field, pattern='^edit_')
+                CallbackQueryHandler(start_edit_field, pattern='^edit_'),
             ],
             EDIT_SAVE_EDIT_FULL_NAME: [
-                MessageHandler(MESSAGE_HANDLERS, save_edit_full_name)
+                MessageHandler(MESSAGE_HANDLERS, save_edit_full_name),
             ],
             EDIT_SAVE_EDIT_EMAIL: [
-                MessageHandler(MESSAGE_HANDLERS, save_edit_email)
+                MessageHandler(MESSAGE_HANDLERS, save_edit_email),
             ],
             EDIT_SAVE_EDIT_PASSWORD: [
-                MessageHandler(MESSAGE_HANDLERS, save_edit_password)
+                MessageHandler(MESSAGE_HANDLERS, save_edit_password),
             ],
             EDIT_SAVE_AVATAR: [
-                MessageHandler(PHOTO_HANDLERS, save_avatar)
+                MessageHandler(PHOTO_HANDLERS, save_avatar),
             ],
             EDIT_FINISH_EDIT: [
-                CallbackQueryHandler(finish_edit, pattern='^finish_edit$')
-            ]
+                CallbackQueryHandler(finish_edit, pattern='^finish_edit$'),
+            ],
         },
         fallbacks=[
-            CallbackQueryHandler(finish_edit, pattern='^finish_edit$')
-        ]
+            CallbackQueryHandler(cancel_to_menu, pattern=f'^{MENU}$'),
+            CommandHandler('menu', cancel_to_menu),
+            CallbackQueryHandler(finish_edit, pattern='^finish_edit$'),
+        ],
     )
     application.add_handler(
         registration_conversation_handler

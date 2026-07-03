@@ -32,8 +32,11 @@ class Settings(BaseSettings):
     min_parser_discount_percent: int | None = None
     min_database_discount_percent: int = 20
     price_history_retention_days: int = 90
-    data_collection_warmup_days: int = 7
-    admin_telegram_id: int = 0
+    data_collection_warmup_days: int = 1
+    admin_telegram_id: str = ''
+    market_check_min_price: int = 10000
+    market_check_discount_percent: int = 10
+    market_check_categories: str = 'electronics,furniture,home'
     crawl_interval_minutes: int = 30
     deals_enabled: bool = True
     max_products_per_category: int = 20
@@ -45,6 +48,27 @@ class Settings(BaseSettings):
         if self.min_parser_discount_percent is not None:
             return self.min_parser_discount_percent
         return self.min_discount_percent
+
+    @property
+    def market_check_category_slugs(self) -> set[str]:
+        if not self.market_check_categories.strip():
+            return set()
+        return {
+            slug.strip()
+            for slug in self.market_check_categories.split(',')
+            if slug.strip()
+        }
+
+    @property
+    def admin_telegram_id_list(self) -> list[int]:
+        if not self.admin_telegram_id.strip():
+            return []
+        result: list[int] = []
+        for part in self.admin_telegram_id.split(','):
+            token = part.strip()
+            if token.isdigit():
+                result.append(int(token))
+        return result
 
     @property
     def database_url(self):
@@ -67,4 +91,3 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-print(settings.database_url)

@@ -22,6 +22,7 @@ from src.parsers.utils import NotFoundError, ParserError
 from src.schemas.deal import DealModerationCreate, DealRunStats, PostedDealCreate
 from src.services.categories_loader import load_categories_config
 from src.services.discount_evaluator import DealAction, DiscountEvaluator
+from src.services.market_price_checker import MarketPriceChecker
 from src.services.post_formatter import format_deal_post, format_moderation_request
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ class DealPipeline:
     def __init__(self, bot: Bot | None = None) -> None:
         self._bot = bot
         self._evaluator = DiscountEvaluator()
+        self._market_checker = MarketPriceChecker()
 
     async def run(self, session: AsyncSession) -> DealRunStats:
         stats = DealRunStats()
@@ -148,8 +150,21 @@ class DealPipeline:
                 average_price,
             )
 
+            if decision.action != DealAction.SKIP:
+                market_result = await self._market_checker.check(
+                    product,
+                    marketplace,
+                    category_slug,
+                )
+                decision = DiscountEvaluator.apply_market_check(
+                    decision,
+                    market_result,
+                )
+
             if decision.action == DealAction.SKIP:
                 stats.skipped_threshold += 1
+                if decision.reason == 'not_cheaper_than_market':
+                    stats.skipped_market_check += 1
                 await self._log_moderation(
                     session,
                     tracked.id,
@@ -214,6 +229,9 @@ class DealPipeline:
                 show_average_price_note=show_avg_note,
                 average_price=decision.average_price,
                 database_discount_percent=decision.database_discount,
+                show_market_note=decision.show_market_note,
+                market_min_price=decision.market_min_price,
+                market_discount_percent=decision.market_discount_percent,
             )
             if message_id is None:
                 stats.errors += 1
@@ -263,29 +281,44 @@ class DealPipeline:
         channel_message_id: int | None = None,
         admin_message_id: int | None = None,
     ) -> None:
-        await deal_moderation_crud.create(
-            session,
-            DealModerationCreate(
-                tracked_product_id=tracked_product_id,
-                marketplace=marketplace,
-                external_id=product.external_id,
-                category_slug=category_slug,
-                hashtag=hashtag,
-                title=product.title,
-                price=product.price,
-                original_price=product.original_price,
-                average_price=decision.average_price,
-                parser_discount_percent=decision.parser_discount,
-                database_discount_percent=decision.database_discount,
-                product_url=product.product_url,
-                image_url=product.image_url,
-                status=status.value,
-                decision_reason=reason_override or decision.reason,
-                admin_telegram_id=settings.admin_telegram_id or None,
-                admin_message_id=admin_message_id,
-                channel_message_id=channel_message_id,
-            ),
-        )
+        try:
+            await deal_moderation_crud.create(
+                session,
+                DealModerationCreate(
+                    tracked_product_id=tracked_product_id,
+                    marketplace=marketplace,
+                    external_id=product.external_id,
+                    category_slug=category_slug,
+                    hashtag=hashtag,
+                    title=product.title,
+                    price=product.price,
+                    original_price=product.original_price,
+                    average_price=decision.average_price,
+                    parser_discount_percent=decision.parser_discount,
+                    database_discount_percent=decision.database_discount,
+                    market_min_price=decision.market_min_price,
+                    market_discount_percent=decision.market_discount_percent,
+                    product_url=product.product_url,
+                    image_url=product.image_url,
+                    status=status.value,
+                    decision_reason=reason_override or decision.reason,
+                    admin_telegram_id=(
+                        settings.admin_telegram_id_list[0]
+                        if settings.admin_telegram_id_list
+                        else None
+                    ),
+                    admin_message_id=admin_message_id,
+                    channel_message_id=channel_message_id,
+                ),
+            )
+        except Exception as exc:
+            await session.rollback()
+            logger.warning(
+                'Failed to log moderation for %s/%s: %s',
+                marketplace,
+                product.external_id,
+                exc,
+            )
 
     async def _send_to_moderation(
         self,
@@ -297,7 +330,7 @@ class DealPipeline:
         hashtag: str,
         decision,
     ) -> None:
-        if not self._bot or not settings.admin_telegram_id:
+        if not self._bot or not settings.admin_telegram_id_list:
             logger.warning(
                 'Admin not configured, skip moderation for %s',
                 product.title,
@@ -329,11 +362,13 @@ class DealPipeline:
                 average_price=decision.average_price,
                 parser_discount_percent=decision.parser_discount,
                 database_discount_percent=decision.database_discount,
+                market_min_price=decision.market_min_price,
+                market_discount_percent=decision.market_discount_percent,
                 product_url=product.product_url,
                 image_url=product.image_url,
                 status=ModerationStatus.PENDING.value,
                 decision_reason=decision.reason,
-                admin_telegram_id=settings.admin_telegram_id,
+                admin_telegram_id=settings.admin_telegram_id_list[0],
             ),
         )
 
@@ -344,6 +379,8 @@ class DealPipeline:
             parser_discount=decision.parser_discount,
             database_discount=decision.database_discount,
             average_price=decision.average_price,
+            market_min_price=decision.market_min_price,
+            market_discount_percent=decision.market_discount_percent,
             reason=decision.reason,
         )
         keyboard = InlineKeyboardMarkup([
@@ -360,27 +397,42 @@ class DealPipeline:
         ])
 
         try:
-            if product.image_url:
-                message = await self._bot.send_photo(
-                    chat_id=settings.admin_telegram_id,
-                    photo=product.image_url,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=keyboard,
-                )
-            else:
-                message = await self._bot.send_message(
-                    chat_id=settings.admin_telegram_id,
-                    text=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=keyboard,
-                )
+            first_message_id: int | None = None
+            for admin_id in settings.admin_telegram_id_list:
+                try:
+                    if product.image_url:
+                        message = await self._bot.send_photo(
+                            chat_id=admin_id,
+                            photo=product.image_url,
+                            caption=caption,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=keyboard,
+                        )
+                    else:
+                        message = await self._bot.send_message(
+                            chat_id=admin_id,
+                            text=caption,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=keyboard,
+                        )
+                    if first_message_id is None:
+                        first_message_id = message.message_id
+                except Exception as exc:
+                    logger.warning(
+                        'Failed to send moderation to admin %s: %s',
+                        admin_id,
+                        exc,
+                    )
+
+            if first_message_id is None:
+                raise RuntimeError('moderation not delivered to any admin')
+
             await deal_moderation_crud.update_status(
                 session,
                 moderation,
                 ModerationStatus.PENDING,
                 decision.reason,
-                admin_message_id=message.message_id,
+                admin_message_id=first_message_id,
             )
         except Exception as exc:
             logger.exception('Failed to send moderation request: %s', exc)
@@ -401,6 +453,9 @@ class DealPipeline:
         show_average_price_note: bool = False,
         average_price=None,
         database_discount_percent: int | None = None,
+        show_market_note: bool = False,
+        market_min_price=None,
+        market_discount_percent: int | None = None,
     ) -> int | None:
         if not settings.deals_enabled:
             logger.info('Deals disabled, skip post: %s', product.title)
@@ -420,6 +475,9 @@ class DealPipeline:
             show_average_price_note=show_average_price_note,
             average_price=average_price,
             database_discount_percent=database_discount_percent,
+            show_market_note=show_market_note,
+            market_min_price=market_min_price,
+            market_discount_percent=market_discount_percent,
         )
         channel_id = settings.telegram_channel_id
         try:

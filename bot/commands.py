@@ -4,11 +4,12 @@ from telegram.ext import Application
 BOT_COMMANDS: list[BotCommand] = [
     BotCommand('start', 'Запустить бота'),
     BotCommand('menu', 'Главное меню'),
-    BotCommand('info', 'Информация о боте'),
-    BotCommand('auth', 'Авторизация'),
-    BotCommand('account_settings', 'Настройки аккаунта'),
-    BotCommand('deals_status', 'Статус автопостинга скидок'),
-    BotCommand('force_crawl', 'Запустить обход категорий'),
+    BotCommand('help', 'Как пользоваться'),
+    BotCommand('add', 'Добавить товар'),
+    BotCommand('info', 'О боте'),
+    BotCommand('account_settings', 'Аккаунт'),
+    BotCommand('deals_status', 'Статус канала (админ)'),
+    BotCommand('force_crawl', 'Обход категорий (админ)'),
 ]
 
 

@@ -1,11 +1,18 @@
 from decimal import Decimal
 
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy import ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.database.annotations import int_pk, not_null_str, optional_utc_datetime
 from src.database.enums import ModerationStatus
 from src.models.base import Base
+
+_moderation_status_enum = SAEnum(
+    ModerationStatus,
+    name='moderationstatus',
+    values_callable=lambda enum: [member.value for member in enum],
+)
 
 
 class DealModeration(Base):
@@ -32,9 +39,16 @@ class DealModeration(Base):
     database_discount_percent: Mapped[int | None] = mapped_column(
         Integer, nullable=True
     )
+    market_min_price: Mapped[Decimal | None] = mapped_column(Numeric, nullable=True)
+    market_discount_percent: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
     product_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     image_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
-    status: Mapped[ModerationStatus] = mapped_column(nullable=False)
+    status: Mapped[ModerationStatus] = mapped_column(
+        _moderation_status_enum,
+        nullable=False,
+    )
     decision_reason: Mapped[not_null_str]
     admin_telegram_id: Mapped[int | None] = mapped_column(nullable=True)
     admin_message_id: Mapped[int | None] = mapped_column(nullable=True)

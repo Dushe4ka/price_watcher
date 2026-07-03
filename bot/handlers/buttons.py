@@ -1,221 +1,32 @@
-from telegram import InlineKeyboardButton
+"""Legacy-обёртки. Новый код использует bot.navigation.Keyboards."""
 
-from bot.handlers.callback_data import (ACCOUNT_SETTINGS, ADD_TRACK, BOT_INFO,
-                                        CANCEL_DELETE, CHECK_HISTORY,
-                                        CONFIRM_DELETE, EDIT_ADD_AVATAR,
-                                        EDIT_EMAIL_CALLBACK,
-                                        EDIT_FULL_NAME_CALLBACK, EDIT_PASSWORD,
-                                        FINISH_EDIT, MENU,
-                                        SHOW_ALL_TRACK,
-                                        START_NOTIFICATIONS,
-                                        START_REGISTRATION, WILDBERRIES)
+from bot.navigation.helpers import get_track_keyboard
+from bot.navigation.keyboards import Keyboards
 
-
-# buttons
-GO_TO_TRACK_LIST_BUTTON = InlineKeyboardButton(
-    'Вернуться к списку товаров ⬅️',
-    callback_data=SHOW_ALL_TRACK
-)
-MENU_BUTTON = InlineKeyboardButton(
-    'Меню 📦', callback_data=MENU
-)
-AUTHORIZATION_BUTTON = InlineKeyboardButton(
-    '🔐 Авторизация', callback_data='authorization'
-)
-ACCOUNT_SETTINS_BUTTON = InlineKeyboardButton(
-    text='⚙️ Настройки аккаунта',
-    callback_data=ACCOUNT_SETTINGS
-)
-
-# handlers.base buttons
-MENU_BUTTONS = [
-    [
-        InlineKeyboardButton(
-            text='📦 Мои товары',
-            callback_data=SHOW_ALL_TRACK
-        )
-    ],
-    [
-        InlineKeyboardButton(
-            text='➕ Добавить товар',
-            callback_data=ADD_TRACK
-        )
-    ],
-    [
-        InlineKeyboardButton(
-            text='🔔 Включить оповещения',
-            callback_data=START_NOTIFICATIONS
-        )
-    ],
-    [
-        ACCOUNT_SETTINS_BUTTON
-    ],
-    [
-        InlineKeyboardButton(
-            text='ℹ️ О боте',
-            callback_data=BOT_INFO
-        )
-    ],
-]
-REGISTER_USER_BUTTONS = [
-    [
-        MENU_BUTTON,
-        ACCOUNT_SETTINS_BUTTON
-    ]
-]
-NOT_REGISTER_USER_BUTTONS = [
-    [AUTHORIZATION_BUTTON]
-]
-START_REGISTRATION_BUTTONS = [
-    [
-        InlineKeyboardButton(
-            'Начать регистрацию 🔥',
-            callback_data=START_REGISTRATION
-        )
-    ]
-]
+# Списки кнопок для InlineKeyboardMarkup(...) — через .inline_keyboard
+GO_BACK_NEW_TARGET_PRICE_BUTTONS = Keyboards.track_nav().inline_keyboard
+SELECT_MARKETPLACE_BUTTONS = Keyboards.select_marketplace().inline_keyboard
+CHECK_HISTORY_BUTTONS = Keyboards.track_nav().inline_keyboard
+CONFIRM_TRACK_DELETE_BUTTONS = Keyboards.confirm_delete().inline_keyboard
+FINISH_DELETE_TRACK_BUTTONS = Keyboards.after_delete().inline_keyboard
+START_NOTIFICATIONS_BUTTONS = Keyboards.notifications_on().inline_keyboard
+GET_NEW_TARGET_PRICE_BUTTONS = Keyboards.track_nav().inline_keyboard
+ACCOUNT_SETTINGS_BUTTONS = Keyboards.account_menu().inline_keyboard
+LOAD_ACCOUNT_DATA = Keyboards.account_profile().inline_keyboard
+CHECK_ACCOUNT_DATA_BUTTONS = Keyboards.account_profile().inline_keyboard
+FINISH_REGISTRATION_BUTTONS = Keyboards.after_registration().inline_keyboard
+FINISH_AUTHORIZATION_BUTTONS = Keyboards.after_auth().inline_keyboard
+EDIT_BUTTONS = Keyboards.edit_profile().inline_keyboard
+FINISH_EDIT_BUTTONS = Keyboards.after_edit().inline_keyboard
 
 
-# handlers.track
-def get_track_keyboard(track_id: int) -> list[InlineKeyboardButton]:
-    """Собирает кнопки для экземпляра Track."""
-    return [
-        [
-            InlineKeyboardButton(
-                'Изменить ⚡',
-                callback_data=f'track_refresh_target_price_{track_id}'
-            ),
-            InlineKeyboardButton(
-                'Удалить ❌',
-                callback_data=f'track_delete_{track_id}'
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                'Посмотреть историю 🛍️',
-                callback_data=f'{CHECK_HISTORY}_{track_id}'
-            )
-        ]
-    ]
+def tracks_list_footer():
+    return Keyboards.tracks_list_footer().inline_keyboard
 
 
-SHOW_ALL_BUTTONS = [
-    [
-        InlineKeyboardButton(
-            'Отследить товар 🔍',
-            callback_data=ADD_TRACK
-        )
-    ],
-    [
-        MENU_BUTTON
-    ]
-]
-GO_BACK_NEW_TARGET_PRICE_BUTTONS = [
-    [
-        GO_TO_TRACK_LIST_BUTTON,
-        MENU_BUTTON
-    ]
-]
-SELECT_MARKETPLACE_BUTTONS = [
-    [
-        InlineKeyboardButton(
-            'WB 🟣',
-            callback_data=f'track_{WILDBERRIES}'
-        ),
-        InlineKeyboardButton(
-            'OZON (WB)🔵',
-            callback_data=f'track_{WILDBERRIES}'
-        )
-    ]
-]
+def tracks_empty():
+    return Keyboards.tracks_empty().inline_keyboard
 
 
-def get_create_track_buttons(
-    track_id: int
-):
-    return (
-        get_track_keyboard(track_id)
-        + [[
-            GO_TO_TRACK_LIST_BUTTON
-        ]]
-    )
-
-
-CHECK_HISTORY_BUTTONS = [
-    [GO_TO_TRACK_LIST_BUTTON],
-    [MENU_BUTTON]
-]
-CONFIRM_TRACK_DELETE_BUTTONS = [
-    [
-        InlineKeyboardButton(
-            'Подтвердить 🖱️',
-            callback_data=CONFIRM_DELETE
-        ),
-        InlineKeyboardButton(
-            'Назад ⬅️',
-            callback_data=CANCEL_DELETE
-        )
-    ]
-]
-FINISH_DELETE_TRACK_BUTTONS = [
-    [GO_TO_TRACK_LIST_BUTTON]
-]
-START_NOTIFICATIONS_BUTTONS = [
-    [MENU_BUTTON]
-]
-GET_NEW_TARGET_PRICE_BUTTONS = [
-    [GO_TO_TRACK_LIST_BUTTON]
-]
-
-# handlers.user
-ACCOUNT_SETTINGS_BUTTONS = [
-    [MENU_BUTTON]
-]
-LOAD_ACCOUNT_DATA = [
-    [MENU_BUTTON],
-    [ACCOUNT_SETTINS_BUTTON]
-]
-CHECK_ACCOUNT_DATA_BUTTONS = [
-    [
-        MENU_BUTTON,
-        InlineKeyboardButton('Назад ⬅️', callback_data=ACCOUNT_SETTINGS)
-    ]
-]
-FINISH_REGISTRATION_BUTTONS = [
-    [AUTHORIZATION_BUTTON]
-]
-FINISH_AUTHORIZATION_BUTTONS = [
-    [MENU_BUTTON],
-    [ACCOUNT_SETTINS_BUTTON]
-]
-EDIT_BUTTONS = [
-    [
-        InlineKeyboardButton(
-            'Добавить фото', callback_data=EDIT_ADD_AVATAR
-        )
-    ],
-    [
-        InlineKeyboardButton(
-            'Полное имя', callback_data=EDIT_FULL_NAME_CALLBACK
-        ),
-        InlineKeyboardButton(
-            'Почта', callback_data=EDIT_EMAIL_CALLBACK
-        ),
-        InlineKeyboardButton(
-            'Пароль', callback_data=EDIT_PASSWORD
-        )
-    ],
-    [
-        InlineKeyboardButton(
-            'Применить ✅', callback_data=FINISH_EDIT
-        )
-    ]
-]
-FINISH_EDIT_BUTTONS = [
-    [
-        InlineKeyboardButton(
-            'Назад', callback_data=ACCOUNT_SETTINGS
-        )
-    ],
-    [MENU_BUTTON]
-]
+def get_create_track_buttons(track_id: int):
+    return get_track_keyboard(track_id)

@@ -59,6 +59,7 @@ class DealRunStats(BaseModel):
     sent_to_moderation: int = 0
     skipped_duplicate: int = 0
     skipped_threshold: int = 0
+    skipped_market_check: int = 0
     errors: int = 0
 
 
@@ -74,6 +75,8 @@ class DealModerationCreate(BaseModel):
     average_price: Decimal | None = None
     parser_discount_percent: int | None = None
     database_discount_percent: int | None = None
+    market_min_price: Decimal | None = None
+    market_discount_percent: int | None = None
     product_url: str | None = None
     image_url: str | None = None
     status: str

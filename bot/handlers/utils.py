@@ -5,13 +5,12 @@ from aiohttp import ClientSession
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from cryptography.fernet import Fernet
-from telegram import (CallbackQuery, InlineKeyboardButton,
-                      InlineKeyboardMarkup, InputFile, Update)
+from telegram import (CallbackQuery, InlineKeyboardMarkup, InputFile, Update)
 from telegram.ext import ContextTypes, ConversationHandler
 
 from bot.endpoints import GET_USER_BY_TELEGRAM_ID
-from bot.handlers.callback_data import CHECK_HISTORY
 from bot.handlers.constants import PARSE_MODE
+from bot.navigation import copy as nav_texts
 
 password_hasher = PasswordHasher()
 
@@ -35,8 +34,17 @@ def catch_error(error_message: str, conv=False):
             try:
                 return await handler(update, context, *args, **kwargs)
             except Exception as error:
-                interaction = await get_interaction(update)
-                await interaction.message.reply_text(error_message)
+                try:
+                    interaction = await get_interaction(update)
+                    await send_tracked_message(
+                        interaction, context, text=error_message,
+                    )
+                except Exception:
+                    if update.effective_chat:
+                        await context.bot.send_message(
+                            chat_id=update.effective_chat.id,
+                            text=error_message,
+                        )
                 print(str(error))
                 if conv:
                     return ConversationHandler.END
@@ -82,10 +90,16 @@ async def check_authorization(
     interaction: Update | CallbackQuery,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    """Проверяет, авторизаван ли пользователь."""
+    """Проверяет, авторизован ли пользователь."""
     if not context.user_data.get('account', {}).get('jwt_token'):
-        await interaction.message.reply_text(
-            'Для совершения этой операции необходима авторизация /auth ⚠️'
+        from bot.navigation.keyboards import Keyboards
+
+        await send_tracked_message(
+            interaction,
+            context,
+            text=nav_texts.AUTH_REQUIRED,
+            reply_markup=Keyboards.auth_required(),
+            parse_mode=PARSE_MODE,
         )
         return False
     return True
@@ -116,23 +130,53 @@ def escape_markdown_v2(text: str) -> str:
 
 
 async def get_interaction(update: Update) -> Update | CallbackQuery:
-    """Функция для определения действия с пользователем."""
+    """Возвращает callback query или update с сообщением."""
     if update.callback_query:
         query = update.callback_query
         await query.answer()
         return query
-    elif update.message:
+    if update.message:
         return update
+    raise ValueError('Update has no message or callback_query')
+
+
+def get_chat_id(interaction: Update | CallbackQuery) -> int:
+    if isinstance(interaction, CallbackQuery):
+        if interaction.message:
+            return interaction.message.chat_id
+        return interaction.from_user.id
+    if interaction.effective_chat:
+        return interaction.effective_chat.id
+    if interaction.message:
+        return interaction.message.chat_id
+    raise ValueError('Cannot resolve chat_id from interaction')
+
+
+async def send_tracked_message(
+    interaction: Update | CallbackQuery,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    reply_markup: InlineKeyboardMarkup = None,
+    parse_mode: str = PARSE_MODE,
+) -> None:
+    """Отправляет сообщение в чат (работает и для callback, и для команд)."""
+    message = await context.bot.send_message(
+        chat_id=get_chat_id(interaction),
+        text=text,
+        reply_markup=reply_markup,
+        parse_mode=parse_mode,
+    )
+    add_message_to_delete_list(message, context)
 
 
 def get_headers(
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ) -> dict[str, str]:
     """Собирает заголовок для прохождения авторизации."""
     return dict(
         Authorization=(
             f'Bearer {context.user_data["account"]["jwt_token"]}'
-        )
+        ),
     )
 
 
@@ -141,59 +185,21 @@ def decode_jwt_token(encoded_jwt_token):
     return decoded_jwt_token.decode()
 
 
-# Утилиты для работы с клавиатурами.
-def get_track_keyboard(track_id: int) -> list[InlineKeyboardButton]:
-    """Собирает кнопки для экземпляра Track."""
-    return [
-        [
-            InlineKeyboardButton(
-                'Изменить ⚡',
-                callback_data=f'track_refresh_target_price_{track_id}'
-            ),
-            InlineKeyboardButton(
-                'Удалить ❌',
-                callback_data=f'track_delete_{track_id}'
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                'Посмотреть историю 🛍️',
-                callback_data=f'{CHECK_HISTORY}_{track_id}'
-            )
-        ]
-    ]
-
-
-async def send_tracked_message(
-    interaction: Update | CallbackQuery,
-    context: ContextTypes.DEFAULT_TYPE,
-    text: str,
-    reply_markup: InlineKeyboardMarkup = None,
-    parse_mode: str = PARSE_MODE
-) -> None:
-    """Функция для одновременной отправки и отслеживания сообщения."""
-    message = await interaction.message.reply_text(
-        text=text,
-        reply_markup=reply_markup,
-        parse_mode=parse_mode
-    )
-    add_message_to_delete_list(message, context)
-
-
 async def send_tracked_photo(
     interaction: Update | CallbackQuery,
     context: ContextTypes.DEFAULT_TYPE,
     caption: str,
     photo: InputFile,
     reply_markup: InlineKeyboardMarkup = None,
-    parse_mode: str = PARSE_MODE
+    parse_mode: str = PARSE_MODE,
 ) -> None:
-    """Функция для одновременной отправки и отслеживания фото."""
+    """Отправляет фото в чат и отслеживает сообщение."""
     message = await context.bot.send_photo(
-        chat_id=interaction.effective_chat.id,
+        chat_id=get_chat_id(interaction),
         photo=photo,
         caption=caption,
         reply_markup=reply_markup,
-        parse_mode=parse_mode
+        parse_mode=parse_mode,
     )
     add_message_to_delete_list(message, context)
+

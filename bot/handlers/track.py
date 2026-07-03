@@ -4,36 +4,36 @@ from http import HTTPStatus
 import aiohttp
 from telegram import InlineKeyboardMarkup, Update
 from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
-                          ContextTypes, ConversationHandler, MessageHandler)
+                          CommandHandler, ContextTypes, ConversationHandler,
+                          MessageHandler)
 
 from bot.endpoints import (CREATE_NEW_TRACK, DELETE_TRACK_BY_ID,
                            GET_TRACKS_PRICE_HISTORY, USERS_TRACKS,
                            USERS_TRACKS_BY_ID)
-from bot.handlers.buttons import (CHECK_HISTORY_BUTTONS,
-                                  CONFIRM_TRACK_DELETE_BUTTONS,
+from bot.handlers.buttons import (CONFIRM_TRACK_DELETE_BUTTONS,
                                   FINISH_DELETE_TRACK_BUTTONS,
                                   GO_BACK_NEW_TARGET_PRICE_BUTTONS,
-                                  SELECT_MARKETPLACE_BUTTONS, SHOW_ALL_BUTTONS,
-                                  get_create_track_buttons, get_track_keyboard,
-                                  GET_NEW_TARGET_PRICE_BUTTONS)
+                                  get_create_track_buttons,
+                                  tracks_empty, tracks_list_footer)
 from bot.handlers.callback_data import (ADD_TRACK, CANCEL_DELETE,
                                         CHECK_HISTORY, CONFIRM_DELETE,
-                                        DELETE_TRACK, OZON,
-                                        SHOW_ALL_TRACK, WILDBERRIES)
+                                        DELETE_TRACK, MENU, SHOW_ALL_TRACK)
 from bot.handlers.constants import MESSAGE_HANDLERS, PARSE_MODE
 from bot.handlers.pre_process import (clear_messages,
                                       load_data_for_register_user)
 from bot.handlers.utils import (catch_error, check_authorization, get_headers,
                                 get_interaction, send_tracked_message)
 from bot.handlers.validators import validate_price
+from bot.navigation import copy as nav_texts
+from bot.navigation.handlers import cancel_to_menu
+from bot.navigation.helpers import get_track_keyboard
+from bot.navigation.keyboards import Keyboards
+from bot.services.track_link_parser import (is_track_url, parse_track_input)
 
 # Состояния для ConversationHandler
 SAVE_NEW_TARGET_PRICE = 'save_new_target_price'
-
-ADD_TRACK_ADD_ARTICLE = 'add_article'
-ADD_TRACK_ADD_TARGET_PRICE = 'add_target_price'
-ADD_TRACK_CREATE_NEW_TRACK = 'create_new_track'
-
+TRACK_FLOW_INPUT = 'input'
+TRACK_FLOW_PRICE = 'price'
 FINISH_DELETE_TRACK = 'delete_track'
 
 # Сообщения для reply_text
@@ -41,13 +41,8 @@ SHOW_ALL_ERROR = (
     'Что-то пошло не так при загрузке отслеживаемых товаров! ❌\n'
     'Попробуйте еще раз!'
 )
-EMPTY_TRACKS = (
-    'У вас пока нет отслеживаемых товаров 😢'
-)
-SHOW_ALL_AUTH_ERROR = (
-    'Перед просмотром отслеживаемых товаров необходимо пройти '
-    '/auth авторизацию ⚠️'
-)
+EMPTY_TRACKS = nav_texts.TRACKS_EMPTY
+SHOW_ALL_AUTH_ERROR = nav_texts.AUTH_REQUIRED
 TRACK_REFRESH_ERROR = (
     'Что-то пошло не так при обновлении отслеживаемого товара! ❌\n'
     'Попробуйте еще раз!'
@@ -85,10 +80,10 @@ _____________________________________
 """
 
 
-SELECT_MARKETPLACE_MESSAGE = 'Выберите маркетплэйс для поиска товара 🛍️'
-SELECT_ARTICLE_MESSAGE = 'Укажите артикул товара 🏷️'
-SELECT_TARGET_PRICE_MESSAGE = 'Укажите желаемую цену 🧾'
-SUCCESS_CREATE_TRACK_MESSAGE = 'Новый товар добавлен! ✅'
+SELECT_TARGET_PRICE_MESSAGE = nav_texts.ADD_TRACK_PRICE
+QUICK_ADD_PROMPT = nav_texts.ADD_TRACK_INTRO
+PARSE_INPUT_FAILED = nav_texts.TRACK_INPUT_FAILED
+SUCCESS_CREATE_TRACK_MESSAGE = nav_texts.ADD_TRACK_SUCCESS
 CREATE_NEW_TRACK_ERROR = 'Ошибка при создании нового товара ⚠️'
 DELETE_TRACK_ERROR = 'Ошибка при удалении товара из отслеживаемых ⚠️'
 
@@ -152,8 +147,15 @@ async def show_all(
                 await send_tracked_message(
                     query,
                     context,
-                    text=EMPTY_TRACKS
+                    text=EMPTY_TRACKS,
+                    reply_markup=InlineKeyboardMarkup(tracks_empty()),
                 )
+                return
+            await send_tracked_message(
+                query,
+                context,
+                text=nav_texts.TRACKS_HEADER,
+            )
             true_track_count = false_track_count = 0
             for track in tracks:
                 if Decimal(track['target_price']) >= Decimal(track['current_price']):
@@ -184,7 +186,7 @@ async def show_all(
                     true_track_count=true_track_count,
                     false_track_count=false_track_count
                 ),
-                reply_markup=InlineKeyboardMarkup(SHOW_ALL_BUTTONS)
+                reply_markup=InlineKeyboardMarkup(tracks_list_footer()),
             )
 
 
@@ -240,110 +242,166 @@ async def target_price_refresh(
             return ConversationHandler.END
 
 
+def _clear_track_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop('track_flow', None)
+    context.user_data.pop('new_track', None)
+
+
+def _marketplace_label(marketplace: str) -> str:
+    labels = {
+        'wildberries': 'Wildberries',
+        'ozon': 'Ozon',
+        'yandex_market': 'Яндекс.Маркет',
+    }
+    return labels.get(marketplace, marketplace)
+
+
 @clear_messages
-async def select_marketplace(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-):
-    context.user_data['new_track'] = dict()
+@load_data_for_register_user
+async def start_add_track(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+) -> None:
     interaction = await get_interaction(update)
+    if not await check_authorization(interaction, context):
+        return
+    context.user_data['new_track'] = {}
+    context.user_data['track_flow'] = TRACK_FLOW_INPUT
     await send_tracked_message(
         interaction,
         context,
-        text=SELECT_MARKETPLACE_MESSAGE,
-        reply_markup=InlineKeyboardMarkup(SELECT_MARKETPLACE_BUTTONS)
+        text=QUICK_ADD_PROMPT,
+        reply_markup=Keyboards.add_track_article(),
     )
-    return ADD_TRACK_ADD_ARTICLE
 
 
 @clear_messages
-async def add_article(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-):
-    query = update.callback_query
-    await query.answer()
-    context.user_data['new_track']['marketplace'] = query.data.split('_')[-1]
-    await send_tracked_message(
-        query,
-        context,
-        text=SELECT_ARTICLE_MESSAGE
-    )
-    return ADD_TRACK_ADD_TARGET_PRICE
+@load_data_for_register_user
+async def handle_track_flow_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not update.message or not update.message.text:
+        return
+    if not context.user_data.get('account', {}).get('jwt_token'):
+        return
+
+    text = update.message.text.strip()
+    flow = context.user_data.get('track_flow')
+
+    if flow not in (TRACK_FLOW_INPUT, TRACK_FLOW_PRICE):
+        if is_track_url(text):
+            context.user_data['new_track'] = {}
+            context.user_data['track_flow'] = TRACK_FLOW_INPUT
+            await _receive_track_input(update, context, text)
+        return
+
+    if flow == TRACK_FLOW_INPUT:
+        await _receive_track_input(update, context, text)
+    elif flow == TRACK_FLOW_PRICE:
+        await _receive_target_price(update, context)
 
 
-@clear_messages
-async def add_target_price(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-):
-    context.user_data['new_track']['article'] = update.message.text
+async def _receive_track_input(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+) -> None:
+    parsed = parse_track_input(text)
+    if not parsed:
+        await send_tracked_message(
+            update,
+            context,
+            text=PARSE_INPUT_FAILED,
+            reply_markup=Keyboards.add_track_article(),
+        )
+        return
+
     await update.message.delete()
+    context.user_data['new_track'] = {
+        'marketplace': parsed.marketplace,
+        'article': parsed.article,
+    }
+    context.user_data['track_flow'] = TRACK_FLOW_PRICE
     await send_tracked_message(
         update,
         context,
-        text=SELECT_TARGET_PRICE_MESSAGE
+        text=(
+            f'✅ Распознано: <b>{_marketplace_label(parsed.marketplace)}</b>\n'
+            f'Артикул: <code>{parsed.article}</code>\n\n'
+            f'{SELECT_TARGET_PRICE_MESSAGE}'
+        ),
+        reply_markup=Keyboards.add_track_price(),
     )
-    return ADD_TRACK_CREATE_NEW_TRACK
 
 
-@catch_error(CREATE_NEW_TRACK_ERROR, conv=True)
+@catch_error(CREATE_NEW_TRACK_ERROR)
 @clear_messages
 @load_data_for_register_user
-async def create_new_track(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-):
+async def _receive_target_price(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
     target_price = await validate_price(
         update,
         context,
-        update.message.text
+        update.message.text,
     )
     if not target_price:
-        return ADD_TRACK_CREATE_NEW_TRACK
+        return
+
     context.user_data['new_track']['target_price'] = target_price
     await update.message.delete()
-    context.user_data['track_list'] = dict()
+
     async with aiohttp.ClientSession() as session:
         async with session.post(
             CREATE_NEW_TRACK,
             headers=get_headers(context),
-            json=context.user_data['new_track']
+            json=context.user_data['new_track'],
         ) as response:
             if response.status == HTTPStatus.UNAUTHORIZED:
-                await update.message.reply_text(
-                    OUTDATED_AUTHORIZATION_ERROR
+                await send_tracked_message(
+                    update,
+                    context,
+                    text=OUTDATED_AUTHORIZATION_ERROR,
                 )
-                return ConversationHandler.END
-            elif response.status == HTTPStatus.BAD_REQUEST:
+                return
+            if response.status == HTTPStatus.BAD_REQUEST:
                 error_data = await response.json()
-                await update.message.reply_text(
-                    CREATE_BAD_REQUEST_ERROR.format(
-                        error_message=error_data.get('detail')
-                    )
+                detail = error_data.get('detail', 'Неизвестная ошибка')
+                context.user_data['track_flow'] = TRACK_FLOW_PRICE
+                await send_tracked_message(
+                    update,
+                    context,
+                    text=CREATE_BAD_REQUEST_ERROR.format(
+                        error_message=detail,
+                    ),
+                    reply_markup=Keyboards.tracks_list_footer(),
                 )
-                await select_marketplace(update, context)
-                return ADD_TRACK_ADD_ARTICLE
+                return
+
             new_track = await response.json()
-            await send_tracked_message(
-                update,
-                context,
-                text=SUCCESS_CREATE_TRACK_MESSAGE
-            )
-            track_card = TRACK_CARD.format(
-                title=new_track['title'],
-                article=new_track['article'],
-                current_price=new_track['current_price'],
-                target_price=new_track['target_price'],
-                created_at=new_track['created_at'],
-                last_checked_at=new_track['last_checked_at']
-            )
-            context.user_data['track_list'][f'{new_track["id"]}'] = track_card
-            await send_tracked_message(
-                update,
-                context,
-                text=track_card,
-                reply_markup=InlineKeyboardMarkup(
-                    get_create_track_buttons(new_track['id'])
-                )
-            )
-            return ConversationHandler.END
+
+    await send_tracked_message(
+        update,
+        context,
+        text=SUCCESS_CREATE_TRACK_MESSAGE,
+    )
+    track_card = TRACK_CARD.format(
+        title=new_track['title'],
+        article=new_track['article'],
+        current_price=new_track['current_price'],
+        target_price=new_track['target_price'],
+        created_at=new_track['created_at'],
+        last_checked_at=new_track['last_checked_at'],
+    )
+    await send_tracked_message(
+        update,
+        context,
+        text=track_card,
+        reply_markup=InlineKeyboardMarkup(
+            get_create_track_buttons(new_track['id']),
+        ),
+    )
+    _clear_track_flow(context)
 
 
 @catch_error(PRICE_HISTORY_ERROR)
@@ -367,7 +425,7 @@ async def check_track_history(
             if not writes:
                 await query.message.reply_text(
                     EMPTY_TRACK_HISTORY_MESSAGE,
-                    reply_markup=InlineKeyboardMarkup(CHECK_HISTORY_BUTTONS)
+                    reply_markup=Keyboards.track_nav(),
                 )
                 return
             await send_tracked_message(
@@ -393,7 +451,7 @@ async def check_track_history(
                 query,
                 context,
                 text=TRACK_HISTORY_NAVIGATION,
-                reply_markup=InlineKeyboardMarkup(CHECK_HISTORY_BUTTONS)
+                reply_markup=Keyboards.track_nav(),
             )
 
 
@@ -469,42 +527,20 @@ def handlers_installer(
     refresh_target_price_conversation_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(
-                get_new_target_price, pattern='^track_refresh_target_price_'
-            )
+                get_new_target_price, pattern='^track_refresh_target_price_',
+            ),
         ],
         states={
             SAVE_NEW_TARGET_PRICE: [
-                MessageHandler(MESSAGE_HANDLERS, target_price_refresh)
-            ]
+                MessageHandler(MESSAGE_HANDLERS, target_price_refresh),
+            ],
         },
         fallbacks=[
-            MessageHandler(MESSAGE_HANDLERS, target_price_refresh)
-        ]
-    )
-    add_track_conversation_handler = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(
-                select_marketplace, pattern=f'^{ADD_TRACK}$'
-            )
+            CallbackQueryHandler(cancel_to_menu, pattern=f'^{MENU}$'),
+            CommandHandler('menu', cancel_to_menu),
+            MessageHandler(MESSAGE_HANDLERS, target_price_refresh),
         ],
-        states={
-            ADD_TRACK_ADD_ARTICLE: [
-                CallbackQueryHandler(
-                    add_article, pattern=f'^track_({WILDBERRIES}|{OZON})$'
-                )
-            ],
-            ADD_TRACK_ADD_TARGET_PRICE: [
-                MessageHandler(
-                    MESSAGE_HANDLERS, add_target_price
-                )
-            ],
-            ADD_TRACK_CREATE_NEW_TRACK: [
-                MessageHandler(MESSAGE_HANDLERS, create_new_track)
-            ]
-        },
-        fallbacks=[
-            MessageHandler(MESSAGE_HANDLERS, create_new_track)
-        ]
+        per_message=True,
     )
     delete_track_conversation_handler = ConversationHandler(
         entry_points=[
@@ -521,18 +557,26 @@ def handlers_installer(
             ]
         },
         fallbacks=[
+            CallbackQueryHandler(cancel_to_menu, pattern=f'^{MENU}$'),
+            CommandHandler('menu', cancel_to_menu),
             CallbackQueryHandler(
                 finish_delete_track,
-                pattern=f'^({CONFIRM_DELETE}|{CANCEL_DELETE})$'
-            )
-        ]
+                pattern=f'^({CONFIRM_DELETE}|{CANCEL_DELETE})$',
+            ),
+        ],
+        per_message=True,
     )
     application.add_handler(
-        refresh_target_price_conversation_handler
+        CallbackQueryHandler(start_add_track, pattern=f'^{ADD_TRACK}$'),
+    )
+    application.add_handler(CommandHandler('add', start_add_track))
+    application.add_handler(
+        MessageHandler(MESSAGE_HANDLERS, handle_track_flow_message),
+        group=1,
     )
     application.add_handler(
-        add_track_conversation_handler
+        refresh_target_price_conversation_handler,
     )
     application.add_handler(
-        delete_track_conversation_handler
+        delete_track_conversation_handler,
     )

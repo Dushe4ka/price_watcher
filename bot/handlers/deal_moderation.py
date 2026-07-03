@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 def _is_admin(user_id: int | None) -> bool:
     return bool(
-        settings.admin_telegram_id
-        and user_id == settings.admin_telegram_id
+        user_id is not None
+        and user_id in settings.admin_telegram_id_list
     )
 
 

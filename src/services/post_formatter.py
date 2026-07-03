@@ -28,6 +28,9 @@ def format_deal_post(
     show_average_price_note: bool = False,
     average_price: Decimal | None = None,
     database_discount_percent: int | None = None,
+    show_market_note: bool = False,
+    market_min_price: Decimal | None = None,
+    market_discount_percent: int | None = None,
 ) -> str:
     marketplace_label = MARKETPLACE_LABELS.get(marketplace, marketplace)
     discount = discount_percent if discount_percent is not None else (
@@ -36,6 +39,11 @@ def format_deal_post(
     lines = [
         f'🔥 Скидка {discount}% | {marketplace_label}',
     ]
+    if show_market_note and market_discount_percent is not None:
+        lines.append(
+            f'🛒 Дешевле рынка на {market_discount_percent}% '
+            f'(мин. на других площадках: {_format_price(market_min_price)})'
+        )
     if show_average_price_note and database_discount_percent is not None:
         lines.append(
             f'📊 Скидка относительно средней цены за '
@@ -73,6 +81,8 @@ def format_moderation_request(
     database_discount: int | None,
     average_price: Decimal | None,
     reason: str,
+    market_min_price: Decimal | None = None,
+    market_discount_percent: int | None = None,
 ) -> str:
     marketplace_label = MARKETPLACE_LABELS.get(marketplace, marketplace)
     lines = [
@@ -97,5 +107,9 @@ def format_moderation_request(
         lines.append(f'Скидка по базе: {database_discount}%')
     else:
         lines.append('Скидка по базе: недостаточно данных')
+    if market_min_price is not None:
+        lines.append(f'Мин. цена на других площадках: {_format_price(market_min_price)}')
+    if market_discount_percent is not None:
+        lines.append(f'Дешевле рынка: {market_discount_percent}%')
     lines.extend(['', f'Причина: {reason}', '', 'Опубликовать в канал?'])
     return '\n'.join(lines)
