@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     crawl_interval_minutes: int = 30
     deals_enabled: bool = True
     max_products_per_category: int = 20
+    min_product_rating: float = 4.5
     proxy_list: str = ''
     categories_config_path: str = 'config/monitored_categories.yaml'
 

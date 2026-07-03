@@ -24,6 +24,8 @@ class ParsedProduct:
     in_stock: bool = True
     image_url: str | None = None
     product_url: str | None = None
+    rating: float | None = None
+    review_count: int | None = None
 
 
 class BaseParser(ABC):

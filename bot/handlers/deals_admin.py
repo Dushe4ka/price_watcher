@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from telegram import InlineKeyboardMarkup, Update
@@ -13,6 +14,7 @@ from bot.navigation.keyboards import Keyboards
 from src.core.config import settings
 from src.crud.posted_deal import posted_deal_crud
 from src.database.db import AsyncSessionLocal
+from src.schemas.deal import DealRunStats
 
 logger = logging.getLogger(__name__)
 
@@ -81,42 +83,114 @@ async def force_crawl(
         await _reply_admin_only(update, context)
         return
 
-    interaction = await get_interaction(update)
-    await send_tracked_message(
-        interaction,
-        context,
-        text=texts.FORCE_CRAWL_START,
-    )
-    try:
-        stats = await run_deals_pipeline(context.application)
-    except Exception as exc:
-        logger.exception('Force crawl failed: %s', exc)
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if not chat_id:
+        return
+
+    if context.bot_data.get('_crawl_running'):
+        interaction = await get_interaction(update)
         await send_tracked_message(
-            interaction,
-            context,
-            text=f'❌ Ошибка при обходе:\n<code>{exc}</code>',
+            interaction, context,
+            text='⏳ Обход уже запущен, дождитесь завершения.',
             reply_markup=Keyboards.admin_back(),
         )
         return
+
+    interaction = await get_interaction(update)
     await send_tracked_message(
-        interaction,
-        context,
-        text=(
-            '✅ <b>Обход завершён</b>\n'
-            '━━━━━━━━━━━━━━━━━━━━\n'
-            f'Найдено: {stats.crawled}\n'
-            f'Распарсено: {stats.parsed}\n'
-            f'Цен в базе: {stats.prices_saved}\n'
-            f'Со скидкой: {stats.matched_discount}\n'
-            f'Опубликовано: {stats.posted}\n'
-            f'На модерации: {stats.sent_to_moderation}\n'
-            f'Ниже порога: {stats.skipped_threshold}\n'
-            f'Не дешевле рынка: {stats.skipped_market_check}\n'
-            f'Дубликаты: {stats.skipped_duplicate}\n'
-            f'Ошибки: {stats.errors}'
-        ),
-        reply_markup=Keyboards.admin_back(),
+        interaction, context,
+        text=texts.FORCE_CRAWL_START,
     )
+
+    asyncio.create_task(
+        _run_crawl_background(context.application, chat_id),
+    )
+
+
+async def _run_crawl_background(
+    application, chat_id: int,
+) -> None:
+    application.bot_data['_crawl_running'] = True
+    try:
+        stats = await run_deals_pipeline(application)
+        text = _format_crawl_report(stats)
+    except Exception as exc:
+        logger.exception('Force crawl failed: %s', exc)
+        text = f'❌ Ошибка при обходе:\n<code>{exc}</code>'
+    finally:
+        application.bot_data['_crawl_running'] = False
+
+    try:
+        await application.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode='HTML',
+            reply_markup=Keyboards.admin_back(),
+        )
+    except Exception as exc:
+        logger.warning('Failed to send crawl report: %s', exc)
+
+
+_MP_ICONS = {
+    'wildberries': '🟣',
+    'ozon': '🔵',
+    'yandex_market': '🟡',
+}
+_MP_NAMES = {
+    'wildberries': 'Wildberries',
+    'ozon': 'Ozon',
+    'yandex_market': 'Яндекс Маркет',
+}
+
+
+def _format_crawl_report(stats: DealRunStats) -> str:
+    ok = stats.errors == 0
+    header = '✅ <b>Обход завершён</b>' if ok else '⚠️ <b>Обход завершён с ошибками</b>'
+
+    lines = [header, '']
+
+    if stats.per_marketplace:
+        for mp, ms in sorted(stats.per_marketplace.items()):
+            icon = _MP_ICONS.get(mp, '⚪')
+            name = _MP_NAMES.get(mp, mp)
+            parts = [f'{ms.crawled} найдено']
+            if ms.parsed:
+                parts.append(f'{ms.parsed} распаршено')
+            if ms.posted:
+                parts.append(f'{ms.posted} опубл.')
+            if ms.errors:
+                parts.append(f'{ms.errors} ош.')
+            lines.append(f'{icon} <b>{name}</b>: {" · ".join(parts)}')
+        lines.append('')
+
+    lines.append(f'📦 Найдено: <b>{stats.crawled}</b>  →  распаршено: <b>{stats.parsed}</b>')
+    lines.append(f'💾 Цен сохранено: {stats.prices_saved}')
+    lines.append('')
+
+    if stats.matched_discount or stats.posted or stats.sent_to_moderation:
+        lines.append(f'🏷 Со скидкой: <b>{stats.matched_discount}</b>')
+        if stats.posted:
+            lines.append(f'📢 Опубликовано: <b>{stats.posted}</b>')
+        if stats.sent_to_moderation:
+            lines.append(f'👀 На модерации: {stats.sent_to_moderation}')
+        lines.append('')
+
+    skip_parts = []
+    if stats.skipped_threshold:
+        skip_parts.append(f'порог: {stats.skipped_threshold}')
+    if stats.skipped_low_rating:
+        skip_parts.append(f'рейтинг: {stats.skipped_low_rating}')
+    if stats.skipped_market_check:
+        skip_parts.append(f'рынок: {stats.skipped_market_check}')
+    if stats.skipped_duplicate:
+        skip_parts.append(f'дубли: {stats.skipped_duplicate}')
+    if skip_parts:
+        lines.append(f'⏭ Пропущено: {" · ".join(skip_parts)}')
+
+    if stats.errors:
+        lines.append(f'❌ Ошибки: {stats.errors}')
+
+    return '\n'.join(lines)
 
 
 def deals_admin_handlers_installer(application: Application) -> None:

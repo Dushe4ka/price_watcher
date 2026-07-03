@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.parsers.base import ParsedProduct
 
 
 @dataclass(frozen=True, slots=True)
@@ -10,6 +14,7 @@ class CategoryCrawlResult:
     category_slug: str
     product_ids: list[str] = field(default_factory=list)
     product_urls: list[str] = field(default_factory=list)
+    pre_parsed: dict[str, ParsedProduct] = field(default_factory=dict)
 
 
 class MarketplaceCrawler(ABC):
@@ -21,5 +26,7 @@ class MarketplaceCrawler(ABC):
         crawl_url: str,
         category_slug: str,
         limit: int = 20,
+        *,
+        search_queries: list[str] | None = None,
     ) -> CategoryCrawlResult:
         ...

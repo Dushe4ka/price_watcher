@@ -5,6 +5,7 @@ from decimal import Decimal
 class MarketplaceCategoryConfig(BaseModel):
     marketplace: str
     crawl_url: str
+    search_queries: list[str] = Field(default_factory=list)
 
 
 class CategoryConfig(BaseModel):
@@ -50,6 +51,13 @@ class PostedDealRead(BaseModel):
     model_config = {'from_attributes': True}
 
 
+class MarketplaceStats(BaseModel):
+    crawled: int = 0
+    parsed: int = 0
+    posted: int = 0
+    errors: int = 0
+
+
 class DealRunStats(BaseModel):
     crawled: int = 0
     parsed: int = 0
@@ -60,7 +68,14 @@ class DealRunStats(BaseModel):
     skipped_duplicate: int = 0
     skipped_threshold: int = 0
     skipped_market_check: int = 0
+    skipped_low_rating: int = 0
     errors: int = 0
+    per_marketplace: dict[str, MarketplaceStats] = Field(default_factory=dict)
+
+    def mp(self, marketplace: str) -> MarketplaceStats:
+        if marketplace not in self.per_marketplace:
+            self.per_marketplace[marketplace] = MarketplaceStats()
+        return self.per_marketplace[marketplace]
 
 
 class DealModerationCreate(BaseModel):

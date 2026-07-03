@@ -120,6 +120,23 @@ class YandexMarketParser(BaseParser):
         elif isinstance(image_raw, str):
             image_url = image_raw
 
+        rating: float | None = None
+        review_count: int | None = None
+        agg = item.get('aggregateRating')
+        if isinstance(agg, dict):
+            rv = agg.get('ratingValue')
+            if rv is not None:
+                try:
+                    rating = float(rv)
+                except (ValueError, TypeError):
+                    pass
+            rc = agg.get('reviewCount') or agg.get('ratingCount')
+            if rc is not None:
+                try:
+                    review_count = int(rc)
+                except (ValueError, TypeError):
+                    pass
+
         return ParsedProduct(
             external_id=product_id,
             title=title,
@@ -129,6 +146,8 @@ class YandexMarketParser(BaseParser):
             in_stock=in_stock,
             image_url=image_url,
             product_url=self.build_url(product_id),
+            rating=rating,
+            review_count=review_count,
         )
 
 

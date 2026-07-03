@@ -36,6 +36,8 @@ class OzonCategoryCrawler(MarketplaceCrawler):
         crawl_url: str,
         category_slug: str,
         limit: int = 20,
+        *,
+        search_queries: list[str] | None = None,
     ) -> CategoryCrawlResult:
         path = crawl_url if crawl_url.startswith('/') else (
             '/' + crawl_url.split('ozon.ru', 1)[-1].lstrip('/')

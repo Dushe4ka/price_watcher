@@ -61,6 +61,7 @@ class DealPipeline:
                         crawl_url=mp_config.crawl_url,
                         category_slug=category.slug,
                         hashtag=category.hashtag,
+                        search_queries=mp_config.search_queries or None,
                     )
                 except Exception as exc:
                     stats.errors += 1
@@ -81,6 +82,7 @@ class DealPipeline:
         crawl_url: str,
         category_slug: str,
         hashtag: str,
+        search_queries: list[str] | None = None,
     ) -> None:
         crawler = get_crawler(marketplace)
         parser = get_parser(marketplace)
@@ -88,29 +90,48 @@ class DealPipeline:
             crawl_url=crawl_url,
             category_slug=category_slug,
             limit=settings.max_products_per_category,
+            search_queries=search_queries,
         )
-        stats.crawled += len(crawl_result.product_ids)
+        mp_stats = stats.mp(marketplace)
+        n_crawled = len(crawl_result.product_ids)
+        stats.crawled += n_crawled
+        mp_stats.crawled += n_crawled
 
         for product_id in crawl_result.product_ids:
-            try:
-                product = await parser.parse_product(product_id)
+            pre = crawl_result.pre_parsed.get(product_id)
+            if pre is not None:
+                product = pre
                 stats.parsed += 1
-            except NotFoundError:
-                stats.errors += 1
-                continue
-            except ParserError as exc:
-                stats.errors += 1
-                logger.warning(
-                    'Parse error %s/%s: %s',
-                    marketplace,
-                    product_id,
-                    exc,
-                )
-                continue
+                mp_stats.parsed += 1
+            else:
+                try:
+                    product = await parser.parse_product(product_id)
+                    stats.parsed += 1
+                    mp_stats.parsed += 1
+                except NotFoundError:
+                    stats.errors += 1
+                    mp_stats.errors += 1
+                    continue
+                except ParserError as exc:
+                    stats.errors += 1
+                    mp_stats.errors += 1
+                    logger.warning(
+                        'Parse error %s/%s: %s',
+                        marketplace,
+                        product_id,
+                        exc,
+                    )
+                    continue
 
-            await asyncio.sleep(_PRODUCT_DELAY_SEC)
+                await asyncio.sleep(_PRODUCT_DELAY_SEC)
             if not product.in_stock:
                 continue
+
+            min_rating = settings.min_product_rating
+            if min_rating > 0 and product.rating is not None:
+                if product.rating < min_rating:
+                    stats.skipped_low_rating += 1
+                    continue
 
             if not product.product_url:
                 product = ParsedProduct(
@@ -265,6 +286,7 @@ class DealPipeline:
                 channel_message_id=message_id,
             )
             stats.posted += 1
+            mp_stats.posted += 1
 
     async def _log_moderation(
         self,
@@ -383,18 +405,23 @@ class DealPipeline:
             market_discount_percent=decision.market_discount_percent,
             reason=decision.reason,
         )
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    '✅ Принять',
-                    callback_data=f'{MODERATION_APPROVE_PREFIX}{moderation.id}',
-                ),
-                InlineKeyboardButton(
-                    '❌ Отклонить',
-                    callback_data=f'{MODERATION_REJECT_PREFIX}{moderation.id}',
-                ),
-            ],
+        rows = []
+        if product.product_url:
+            rows.append([InlineKeyboardButton(
+                '🛒 Перейти к товару',
+                url=product.product_url,
+            )])
+        rows.append([
+            InlineKeyboardButton(
+                '✅ Принять',
+                callback_data=f'{MODERATION_APPROVE_PREFIX}{moderation.id}',
+            ),
+            InlineKeyboardButton(
+                '❌ Отклонить',
+                callback_data=f'{MODERATION_REJECT_PREFIX}{moderation.id}',
+            ),
         ])
+        keyboard = InlineKeyboardMarkup(rows)
 
         try:
             first_message_id: int | None = None
@@ -467,7 +494,7 @@ class DealPipeline:
             )
             return None
 
-        caption = format_deal_post(
+        post = format_deal_post(
             product,
             marketplace,
             hashtag,
@@ -485,14 +512,16 @@ class DealPipeline:
                 message = await self._bot.send_photo(
                     chat_id=channel_id,
                     photo=product.image_url,
-                    caption=caption,
+                    caption=post.text,
                     parse_mode=ParseMode.HTML,
+                    reply_markup=post.reply_markup,
                 )
             else:
                 message = await self._bot.send_message(
                     chat_id=channel_id,
-                    text=caption,
+                    text=post.text,
                     parse_mode=ParseMode.HTML,
+                    reply_markup=post.reply_markup,
                     disable_web_page_preview=False,
                 )
             return message.message_id

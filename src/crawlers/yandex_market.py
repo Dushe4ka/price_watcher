@@ -22,6 +22,8 @@ class YandexMarketCategoryCrawler(MarketplaceCrawler):
         crawl_url: str,
         category_slug: str,
         limit: int = 20,
+        *,
+        search_queries: list[str] | None = None,
     ) -> CategoryCrawlResult:
         headers = {
             'User-Agent': get_random_ua(),

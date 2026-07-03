@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from decimal import Decimal
 from typing import Any
+from urllib.parse import quote
 
 from src.parsers.base import BaseParser, ParsedProduct
 from src.parsers.utils import (
@@ -13,9 +14,11 @@ from src.parsers.utils import (
     retry_request,
 )
 
-_WB_API_URL = (
-    'https://card.wb.ru/cards/v2/detail'
-    '?appType=1&curr=rub&dest=-1257786&spp=30&nm={article_id}'
+_WB_SEARCH_API = (
+    'https://search.wb.ru/exactmatch/ru/common/v18/search'
+    '?appType=1&curr=rub&dest=-1257786&lang=ru'
+    '&resultset=catalog&sort=popular&spp=30'
+    '&query={query}&page=1'
 )
 _PRODUCT_ID_RE = re.compile(r'wildberries\.ru/catalog/(\d+)')
 
@@ -44,9 +47,38 @@ class WildberriesParser(BaseParser):
         else:
             product_id = url_or_id.strip()
 
-        api_url = _WB_API_URL.format(article_id=product_id)
+        card = await self._fetch_card_json(product_id)
+
+        title = card.get('imt_name', '') or card.get('nm_name', '')
+        if not title:
+            title = f'Wildberries #{product_id}'
+
+        search_data = await self._search_for_price(product_id, title)
+
+        if search_data:
+            return search_data
+
+        return ParsedProduct(
+            external_id=product_id,
+            title=title,
+            price=Decimal(0),
+            original_price=None,
+            discount_percent=None,
+            in_stock=False,
+            image_url=_build_image_url(product_id),
+            product_url=self.build_url(product_id),
+        )
+
+    async def _fetch_card_json(
+        self, product_id: str,
+    ) -> dict[str, Any]:
+        vol, part, basket = _calc_basket(int(product_id))
+        url = (
+            f'https://basket-{basket}.wbbasket.ru'
+            f'/vol{vol}/part{part}/{product_id}/info/ru/card.json'
+        )
         async with create_http_client() as client:
-            response = await client.get(api_url)
+            response = await client.get(url)
             if response.status_code == 403:
                 raise BlockedError(
                     f'Wildberries blocked request for {product_id}'
@@ -57,67 +89,85 @@ class WildberriesParser(BaseParser):
                 )
             response.raise_for_status()
             try:
-                data: dict[str, Any] = response.json()
+                return response.json()
             except Exception as exc:
                 raise ParsingError(
                     f'Failed to decode JSON for WB {product_id}'
                 ) from exc
 
-        products: list[dict[str, Any]] = data.get('data', {}).get(
-            'products', []
-        )
-        if not products:
-            raise NotFoundError(
-                f'Wildberries API returned no products for {product_id}'
-            )
+    async def _search_for_price(
+        self, product_id: str, title: str,
+    ) -> ParsedProduct | None:
+        url = _WB_SEARCH_API.format(query=quote(title[:80], safe=''))
+        async with create_http_client() as client:
+            try:
+                response = await client.get(url)
+            except Exception:
+                return None
+            if response.status_code != 200:
+                return None
+            try:
+                data = response.json()
+            except Exception:
+                return None
 
-        product = products[0]
-        title: str = product.get('name', '')
-        sale_price_raw: int = product.get('salePriceU', 0)
-        price = Decimal(sale_price_raw) / Decimal(100)
-        original_price_raw: int = product.get('priceU', 0)
-        original_price: Decimal | None = (
-            Decimal(original_price_raw) / Decimal(100)
-            if original_price_raw
-            else None
-        )
-        discount_percent: int | None = product.get('sale')
-        if (
-            discount_percent is None
-            and original_price
-            and original_price > 0
-            and price < original_price
-        ):
-            discount_percent = self.calc_discount(price, original_price)
+        for raw in data.get('products', []):
+            if str(raw.get('id', '')) == product_id:
+                return _extract_from_search(raw, product_id)
 
-        return ParsedProduct(
-            external_id=product_id,
-            title=title,
-            price=price,
-            original_price=original_price,
-            discount_percent=discount_percent,
-            in_stock=_check_stock(product),
-            image_url=_build_image_url(product_id),
-            product_url=self.build_url(product_id),
-        )
-
-
-def _check_stock(product: dict[str, Any]) -> bool:
-    total_qty = product.get('totalQuantity')
-    if total_qty is not None:
-        return int(total_qty) > 0
-    for size in product.get('sizes', []):
-        for stock in size.get('stocks', []):
-            if int(stock.get('qty', 0)) > 0:
-                return True
-    return False
-
-
-def _build_image_url(product_id: str) -> str | None:
-    try:
-        pid = int(product_id)
-    except ValueError:
         return None
+
+
+def _extract_from_search(
+    raw: dict[str, Any], product_id: str,
+) -> ParsedProduct | None:
+    name = raw.get('name', '')
+    basic_price = 0
+    sale_price = 0
+
+    for size in raw.get('sizes', []):
+        price_info = size.get('price', {})
+        if price_info:
+            basic_price = price_info.get('basic', 0)
+            sale_price = price_info.get('product', 0)
+            break
+
+    if not sale_price:
+        return None
+
+    price = Decimal(sale_price) / Decimal(100)
+    original_price = Decimal(basic_price) / Decimal(100) if basic_price else None
+
+    discount_percent: int | None = None
+    if original_price and original_price > 0 and price < original_price:
+        discount_percent = int(
+            (original_price - price) / original_price * Decimal(100)
+        )
+
+    in_stock = bool(raw.get('totalQuantity', 0))
+
+    rating_raw = raw.get('reviewRating') or raw.get('rating')
+    rating = float(rating_raw) if rating_raw is not None else None
+    feedbacks = raw.get('feedbacks') or raw.get('nmFeedbacks')
+    review_count = int(feedbacks) if feedbacks is not None else None
+
+    return ParsedProduct(
+        external_id=product_id,
+        title=name or f'Wildberries #{product_id}',
+        price=price,
+        original_price=original_price,
+        discount_percent=discount_percent,
+        in_stock=in_stock,
+        image_url=_build_image_url(product_id),
+        product_url=(
+            f'https://www.wildberries.ru/catalog/{product_id}/detail.aspx'
+        ),
+        rating=rating,
+        review_count=review_count,
+    )
+
+
+def _calc_basket(pid: int) -> tuple[int, int, str]:
     vol = pid // 100_000
     part = pid // 1_000
     if vol <= 143:
@@ -154,6 +204,15 @@ def _build_image_url(product_id: str) -> str | None:
         basket = '16'
     else:
         basket = '17'
+    return vol, part, basket
+
+
+def _build_image_url(product_id: str) -> str | None:
+    try:
+        pid = int(product_id)
+    except ValueError:
+        return None
+    vol, part, basket = _calc_basket(pid)
     return (
         f'https://basket-{basket}.wbbasket.ru'
         f'/vol{vol}/part{part}/{pid}/images/big/1.webp'
