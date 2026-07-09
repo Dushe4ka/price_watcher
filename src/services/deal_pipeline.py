@@ -4,7 +4,7 @@ import asyncio
 import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.constants import ParseMode
 
 from src.core.config import settings
@@ -39,6 +39,37 @@ class DealPipeline:
         self._bot = bot
         self._evaluator = DiscountEvaluator()
         self._market_checker = MarketPriceChecker()
+
+    async def _send_photo_or_message(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        image_url: str | None = None,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> Message:
+        if image_url:
+            try:
+                return await self._bot.send_photo(
+                    chat_id=chat_id,
+                    photo=image_url,
+                    caption=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup,
+                )
+            except Exception as exc:
+                logger.warning(
+                    'Photo send failed for chat %s, fallback to text: %s',
+                    chat_id,
+                    exc,
+                )
+        return await self._bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+            disable_web_page_preview=False,
+        )
 
     async def run(self, session: AsyncSession) -> DealRunStats:
         stats = DealRunStats()
@@ -128,8 +159,11 @@ class DealPipeline:
                 continue
 
             min_rating = settings.min_product_rating
-            if min_rating > 0 and product.rating is not None:
-                if product.rating < min_rating:
+            if min_rating > 0:
+                if settings.require_rating and product.rating is None:
+                    stats.skipped_low_rating += 1
+                    continue
+                if product.rating is not None and product.rating < min_rating:
                     stats.skipped_low_rating += 1
                     continue
 
@@ -427,21 +461,12 @@ class DealPipeline:
             first_message_id: int | None = None
             for admin_id in settings.admin_telegram_id_list:
                 try:
-                    if product.image_url:
-                        message = await self._bot.send_photo(
-                            chat_id=admin_id,
-                            photo=product.image_url,
-                            caption=caption,
-                            parse_mode=ParseMode.HTML,
-                            reply_markup=keyboard,
-                        )
-                    else:
-                        message = await self._bot.send_message(
-                            chat_id=admin_id,
-                            text=caption,
-                            parse_mode=ParseMode.HTML,
-                            reply_markup=keyboard,
-                        )
+                    message = await self._send_photo_or_message(
+                        chat_id=admin_id,
+                        text=caption,
+                        image_url=product.image_url,
+                        reply_markup=keyboard,
+                    )
                     if first_message_id is None:
                         first_message_id = message.message_id
                 except Exception as exc:
@@ -508,22 +533,12 @@ class DealPipeline:
         )
         channel_id = settings.telegram_channel_id
         try:
-            if product.image_url:
-                message = await self._bot.send_photo(
-                    chat_id=channel_id,
-                    photo=product.image_url,
-                    caption=post.text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=post.reply_markup,
-                )
-            else:
-                message = await self._bot.send_message(
-                    chat_id=channel_id,
-                    text=post.text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=post.reply_markup,
-                    disable_web_page_preview=False,
-                )
+            message = await self._send_photo_or_message(
+                chat_id=channel_id,
+                text=post.text,
+                image_url=product.image_url,
+                reply_markup=post.reply_markup,
+            )
             return message.message_id
         except Exception as exc:
             logger.exception('Failed to post deal to channel: %s', exc)
