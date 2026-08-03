@@ -1,23 +1,50 @@
 """Краулеры категорий маркетплейсов."""
 
-from src.crawlers.base import CategoryCrawlResult, MarketplaceCrawler
-from src.crawlers.ozon import OzonCategoryCrawler
-from src.crawlers.wildberries import WildberriesCategoryCrawler
-from src.crawlers.yandex_market import YandexMarketCategoryCrawler
+from __future__ import annotations
 
-CRAWLERS: dict[str, MarketplaceCrawler] = {
-    'ozon': OzonCategoryCrawler(),
-    'wildberries': WildberriesCategoryCrawler(),
-    'yandex_market': YandexMarketCategoryCrawler(),
-}
+from src.crawlers.base import CategoryCrawlResult, MarketplaceCrawler
+
+_CRAWLER_CACHE: dict[str, MarketplaceCrawler] = {}
 
 
 def get_crawler(marketplace: str) -> MarketplaceCrawler:
-    crawler = CRAWLERS.get(marketplace)
-    if crawler is None:
+    cached = _CRAWLER_CACHE.get(marketplace)
+    if cached is not None:
+        return cached
+
+    if marketplace == 'ozon':
+        from src.crawlers.ozon import OzonCategoryCrawler
+        crawler: MarketplaceCrawler = OzonCategoryCrawler()
+    elif marketplace == 'wildberries':
+        from src.crawlers.wildberries import WildberriesCategoryCrawler
+        crawler = WildberriesCategoryCrawler()
+    elif marketplace == 'yandex_market':
+        from src.crawlers.yandex_market import YandexMarketCategoryCrawler
+        crawler = YandexMarketCategoryCrawler()
+    else:
         raise ValueError(f'Unknown marketplace crawler: {marketplace}')
+
+    _CRAWLER_CACHE[marketplace] = crawler
     return crawler
 
+
+class _LazyCrawlers:
+    """Dict-like registry that imports marketplace crawlers on demand."""
+
+    def get(self, marketplace: str, default=None):
+        try:
+            return get_crawler(marketplace)
+        except ValueError:
+            return default
+
+    def __getitem__(self, marketplace: str) -> MarketplaceCrawler:
+        return get_crawler(marketplace)
+
+    def __contains__(self, marketplace: object) -> bool:
+        return marketplace in ('ozon', 'wildberries', 'yandex_market')
+
+
+CRAWLERS = _LazyCrawlers()
 
 __all__ = [
     'CategoryCrawlResult',

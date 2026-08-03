@@ -12,16 +12,16 @@ from src.ozon.client import ozon_client
 from src.parsers import get_parser
 from src.parsers.base import ParsedProduct
 from src.parsers.utils import NotFoundError, ParserError, create_http_client
+from src.parsers.wb_api import (
+    products_from_search_payload,
+    wb_search_headers,
+    wb_search_urls,
+)
 
 logger = logging.getLogger(__name__)
 
 _ALL_MARKETPLACES = ('wildberries', 'ozon', 'yandex_market')
 
-_WB_SEARCH_URL = (
-    'https://search.wb.ru/exactmatch/ru/common/v5/search'
-    '?appType=1&curr=rub&dest=-1257786&query={query}'
-    '&resultset=catalog&limit={limit}&page=1'
-)
 _YM_PRODUCT_LINK_RE = re.compile(
     r'href="[^"]*?/product(?:--[^/"]+)?/(\d+)"'
 )
@@ -142,18 +142,21 @@ async def fetch_market_prices(
 
 
 async def _search_wildberries(query: str, limit: int) -> list[str]:
-    url = _WB_SEARCH_URL.format(query=quote(query), limit=limit)
+    headers = wb_search_headers(query)
     async with create_http_client() as client:
-        response = await client.get(url)
-        if response.status_code != 200:
-            return []
-        try:
-            data: dict[str, Any] = response.json()
-        except json.JSONDecodeError:
-            return []
-
-    products: list[dict[str, Any]] = data.get('data', {}).get('products', [])
-    return [str(item['id']) for item in products if item.get('id')][:limit]
+        for url in wb_search_urls(query, page=1):
+            response = await client.get(url, headers=headers)
+            if response.status_code != 200:
+                continue
+            try:
+                data: dict[str, Any] = response.json()
+            except json.JSONDecodeError:
+                continue
+            products = products_from_search_payload(data)
+            ids = [str(item['id']) for item in products if item.get('id')]
+            if ids:
+                return ids[:limit]
+    return []
 
 
 async def _search_ozon(query: str, limit: int) -> list[str]:
