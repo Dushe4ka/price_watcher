@@ -5,6 +5,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from src.ozon.client import ozon_client
 from src.parsers.base import BaseParser, ParsedProduct
 from src.parsers.utils import (
     BlockedError,
@@ -15,14 +16,6 @@ from src.parsers.utils import (
 )
 
 _PRODUCT_ID_RE = re.compile(r'ozon\.ru/product/.*?-(\d+)/?')
-_MOBILE_API_URL = (
-    'https://api.ozon.ru/composer-api.bx/page/json/v2'
-    '?url=/product/{product_id}/'
-)
-_MOBILE_HEADERS: dict[str, str] = {
-    'x-o3-app-name': 'ozonapp_android',
-    'x-o3-app-version': '17.35.0',
-}
 _JSON_LD_RE = re.compile(
     r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
     re.DOTALL,
@@ -48,6 +41,10 @@ class OzonParser(BaseParser):
         else:
             product_id = url_or_id.strip()
 
+        browser_data = await ozon_client.product_summary(product_id)
+        if browser_data is not None:
+            return browser_data
+
         try:
             return await self._parse_via_api(product_id)
         except NotFoundError:
@@ -56,22 +53,12 @@ class OzonParser(BaseParser):
             return await self._parse_via_html(product_id)
 
     async def _parse_via_api(self, product_id: str) -> ParsedProduct:
-        api_url = _MOBILE_API_URL.format(product_id=product_id)
-        mobile_ua = (
-            'Mozilla/5.0 (Linux; Android 14; SM-S918B) '
-            'AppleWebKit/537.36 (KHTML, like Gecko) '
-            'Chrome/124.0.0.0 Mobile Safari/537.36'
+        browser_data = await ozon_client.product_summary(product_id)
+        if browser_data is not None:
+            return browser_data
+        raise ParsingError(
+            f'Could not extract product data from Ozon API for {product_id}'
         )
-        headers = {'User-Agent': mobile_ua, **_MOBILE_HEADERS}
-        async with create_http_client(headers=headers) as client:
-            response = await client.get(api_url)
-            if response.status_code == 403:
-                raise BlockedError(f'Ozon blocked API for {product_id}')
-            if response.status_code == 404:
-                raise NotFoundError(f'Ozon product {product_id} not found')
-            response.raise_for_status()
-            payload: dict[str, Any] = response.json()
-        return self._extract_from_api_payload(payload, product_id)
 
     def _extract_from_api_payload(
         self,

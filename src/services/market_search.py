@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any
 from urllib.parse import quote
 
+from src.ozon.client import ozon_client
 from src.parsers import get_parser
 from src.parsers.base import ParsedProduct
 from src.parsers.utils import NotFoundError, ParserError, create_http_client
@@ -21,20 +22,6 @@ _WB_SEARCH_URL = (
     '?appType=1&curr=rub&dest=-1257786&query={query}'
     '&resultset=catalog&limit={limit}&page=1'
 )
-_OZON_SEARCH_PATH = '/search/?text={query}&from_global=true'
-_OZON_COMPOSER_URLS = (
-    'https://api.ozon.ru/composer-api.bx/page/json/v2?url={path}',
-    'https://www.ozon.ru/api/composer-api.bx/page/json/v2?url={path}',
-)
-_OZON_MOBILE_HEADERS = {
-    'x-o3-app-name': 'ozonapp_android',
-    'x-o3-app-version': '17.35.0',
-    'User-Agent': (
-        'Mozilla/5.0 (Linux; Android 14; SM-S918B) '
-        'AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/124.0.0.0 Mobile Safari/537.36'
-    ),
-}
 _YM_PRODUCT_LINK_RE = re.compile(
     r'href="[^"]*?/product(?:--[^/"]+)?/(\d+)"'
 )
@@ -170,38 +157,7 @@ async def _search_wildberries(query: str, limit: int) -> list[str]:
 
 
 async def _search_ozon(query: str, limit: int) -> list[str]:
-    path = _OZON_SEARCH_PATH.format(query=quote(query))
-    encoded_path = quote(path, safe='')
-    async with create_http_client(headers=_OZON_MOBILE_HEADERS) as client:
-        for template in _OZON_COMPOSER_URLS:
-            response = await client.get(template.format(path=encoded_path))
-            if response.status_code != 200:
-                continue
-            try:
-                payload: dict[str, Any] = response.json()
-            except json.JSONDecodeError:
-                continue
-            product_ids = _extract_ozon_product_ids(payload, limit)
-            if product_ids:
-                return product_ids
-    return []
-
-
-def _extract_ozon_product_ids(payload: dict[str, Any], limit: int) -> list[str]:
-    product_ids: list[str] = []
-    product_re = re.compile(r'/product/(?:[^/]+-)?(\d+)')
-
-    for raw_value in payload.get('widgetStates', {}).values():
-        if len(product_ids) >= limit:
-            break
-        text = raw_value if isinstance(raw_value, str) else json.dumps(raw_value)
-        for match in product_re.finditer(text):
-            product_id = match.group(1)
-            if product_id not in product_ids:
-                product_ids.append(product_id)
-            if len(product_ids) >= limit:
-                break
-    return product_ids[:limit]
+    return await ozon_client.search_product_ids(query, limit)
 
 
 async def _search_yandex_market(query: str, limit: int) -> list[str]:

@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     max_products_per_category: int = 20
     min_product_rating: float = 4.5
     require_rating: bool = False
+    ozon_enabled: bool = True
+    ozon_proxy_required: bool = False
+    ozon_browser_idle_sec: int = 600
+    ozon_request_delay_sec: float = 0.5
     proxy_list: str = ''
     categories_config_path: str = 'config/monitored_categories.yaml'
 
