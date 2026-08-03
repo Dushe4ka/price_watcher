@@ -71,8 +71,8 @@
 
 | # | Проблема | Приоритет |
 |---|----------|-----------|
-| 1 | Ozon 403 с Docker IP | Высокий — прокси / модем |
-| 2 | WB краулер: 0 товаров | Высокий — исправить catalog API |
+| 1 | Ozon antibot при VPN/DC IP | Высокий — `PROXY_LIST` RU + entrypoint-api (сделано в коде) |
+| 2 | WB краулер: 0 товаров | ✅ nested `data.products` / `salePriceU` |
 | 3 | ЯМ: нет `highPrice` → нет скидки парсера | Высокий — fallback в HTML |
 | 4 | Мало товаров (~68 vs 480 макс.) | Средний — п.1–2 + `MAX_PRODUCTS_PER_CATEGORY` |
 | 5 | `DATA_COLLECTION_WARMUP_DAYS=0` — строгий режим сразу | Низкий — выставить 3–7 на старте |

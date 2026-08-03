@@ -42,9 +42,11 @@ Telegram-сервис для мониторинга цен на маркетпл
 |----------|---------|--------|---------|--------|
 | **Wildberries** | ✅ v18 search API | ✅ basket CDN + search | ✅ | Основной источник |
 | **Яндекс Маркет** | ⚠️ HTML-регулярки | ❌ SPA, нет JSON-LD | ❌ | Нужен headless-браузер |
-| **Ozon** | ❌ 403 | ❌ | ❌ | Anti-bot блокировка |
+| **Ozon** | ✅ Playwright + entrypoint-api | ✅ widgetStates / tiles | ✅ | Нужен чистый RU egress / `PROXY_LIST` |
 
 **WB** — краулер использует поисковые запросы (`search_queries`) из конфига категорий и извлекает цены, рейтинг и отзывы прямо из ответа API. Парсер одиночных товаров получает базовую информацию через basket CDN и дополняет ценами/рейтингом через search API.
+
+**Ozon** — headless Chromium греет antibot-сессию (`abt_att`), затем читает `entrypoint-api.bx` / `composer-api.bx`. При IP в антибот-бане (VPN/DC) — 403 и страница «нет соединения»; задайте `PROXY_LIST` (RU residential/mobile) и при необходимости `OZON_PROXY_REQUIRED=true`. Лимиты: `OZON_REQUEST_DELAY_SEC`, `OZON_FETCH_RETRIES`, circuit-breaker `OZON_BLOCK_COOLDOWN_SEC`. Smoke: `python -m scripts.smoke_ozon_crawl`.
 
 **Почему скидок может быть 0:** скидка по истории БД появляется после нескольких дней обходов (`DATA_COLLECTION_WARMUP_DAYS`).
 
@@ -158,7 +160,12 @@ docker compose logs -f telegram_bot   # логи бота
 | `MARKET_CHECK_MIN_PRICE` | `10000` | порог проверки по рынку (₽) |
 | `MARKET_CHECK_CATEGORIES` | `electronics,furniture,home` | категории для рыночной проверки |
 | `MIN_PRODUCT_RATING` | `4.5` | минимальный рейтинг товара (0 = не фильтровать) |
-| `PROXY_LIST` | — | прокси через запятую |
+| `PROXY_LIST` | — | прокси через запятую (для Ozon — RU residential/mobile) |
+| `OZON_ENABLED` | `true` | включить Ozon crawl/parse |
+| `OZON_PROXY_REQUIRED` | `false` | не ходить в Ozon без `PROXY_LIST` |
+| `OZON_REQUEST_DELAY_SEC` | `0.5` | пауза между запросами Ozon |
+| `OZON_FETCH_RETRIES` | `3` | ретраи + ротация прокси при 403 |
+| `OZON_BLOCK_COOLDOWN_SEC` | `120` | cooldown после серии antibot-блоков |
 | `CATEGORIES_CONFIG_PATH` | `config/monitored_categories.yaml` | категории |
 
 > Админ должен написать боту `/start`, иначе модерация в ЛС не дойдёт.

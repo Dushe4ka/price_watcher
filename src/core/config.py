@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     ozon_proxy_required: bool = False
     ozon_browser_idle_sec: int = 600
     ozon_request_delay_sec: float = 0.5
+    ozon_challenge_timeout_sec: float = 20.0
+    ozon_fetch_retries: int = 3
+    ozon_max_consecutive_blocks: int = 3
+    ozon_block_cooldown_sec: float = 120.0
     proxy_list: str = ''
     categories_config_path: str = 'config/monitored_categories.yaml'
 
