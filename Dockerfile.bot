@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 \
     libasound2 \
     fonts-liberation \
+    xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -39,4 +40,7 @@ COPY config ./config
 COPY alembic.ini .
 COPY alembic ./alembic
 
-CMD ["python", "-m", "bot.main"]
+# WB's antibot challenge stalls forever under headless Chromium (any mode) but
+# resolves in a couple of seconds under a real headed session — xvfb-run gives
+# Chromium a virtual display so it can run headed without a physical monitor.
+CMD ["xvfb-run", "-a", "python", "-m", "bot.main"]

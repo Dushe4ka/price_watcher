@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     ozon_fetch_retries: int = 3
     ozon_max_consecutive_blocks: int = 3
     ozon_block_cooldown_sec: float = 120.0
+    wb_proxy_required: bool = False
+    wb_browser_idle_sec: int = 600
+    wb_request_delay_sec: float = 1.0
+    wb_challenge_timeout_sec: float = 20.0
+    wb_fetch_retries: int = 3
+    wb_max_consecutive_blocks: int = 3
+    wb_block_cooldown_sec: float = 120.0
     proxy_list: str = ''
     categories_config_path: str = 'config/monitored_categories.yaml'
 

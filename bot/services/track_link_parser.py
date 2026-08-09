@@ -10,7 +10,7 @@ OZON_URL = re.compile(
     re.IGNORECASE,
 )
 YANDEX_URL = re.compile(
-    r'market\.yandex\.ru/(?:product--[^/]+/(\d+)|product/(\d+))',
+    r'market\.yandex\.ru/card/[^/\s?#]+/(\d+)',
     re.IGNORECASE,
 )
 WB_ARTICLE = re.compile(r'^\d{5,12}$')
@@ -50,8 +50,7 @@ def parse_track_input(text: str) -> ParsedTrackInput | None:
 
     match = YANDEX_URL.search(cleaned)
     if match:
-        article = match.group(1) or match.group(2)
-        return ParsedTrackInput('yandex_market', article)
+        return ParsedTrackInput('yandex_market', match.group(1))
 
     if WB_ARTICLE.match(cleaned):
         return ParsedTrackInput('wildberries', cleaned)

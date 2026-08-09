@@ -27,10 +27,9 @@ async def main() -> int:
     limit = int(os.getenv('WB_SMOKE_LIMIT', '5'))
     crawler = WildberriesCategoryCrawler()
     result = await crawler.crawl_category(
-        crawl_url='https://www.wildberries.ru/catalog/krasota',
+        crawl_url='https://www.wildberries.ru/catalog/krasota/aptechnaya-kosmetika',
         category_slug='beauty',
         limit=limit,
-        search_queries=['помада'],
     )
     priced = [
         pid

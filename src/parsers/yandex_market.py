@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import json
-import re
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
-
-from selectolax.parser import HTMLParser
 
 from src.parsers.base import BaseParser, ParsedProduct
 from src.parsers.utils import (
@@ -16,9 +12,12 @@ from src.parsers.utils import (
     get_random_ua,
     retry_request,
 )
-
-_PRODUCT_ID_RE = re.compile(
-    r'market\.yandex\.ru/product(?:--[^/]+)?/(\d+)'
+from src.parsers.ym_api import (
+    PRODUCT_URL_RE,
+    build_product_url,
+    extract_offer_prices,
+    iter_ld_json_products,
+    product_id_from_ld_json,
 )
 
 
@@ -26,7 +25,7 @@ class YandexMarketParser(BaseParser):
     marketplace = 'yandex_market'
 
     def extract_product_id(self, url: str) -> str:
-        match = _PRODUCT_ID_RE.search(url)
+        match = PRODUCT_URL_RE.search(url)
         if not match:
             raise ValueError(
                 f'Cannot extract Yandex Market product ID from URL: {url}'
@@ -34,16 +33,21 @@ class YandexMarketParser(BaseParser):
         return match.group(1)
 
     def build_url(self, product_id: str) -> str:
-        return f'https://market.yandex.ru/product/{product_id}'
+        return build_product_url(product_id)
 
     @retry_request
     async def parse_product(self, url_or_id: str) -> ParsedProduct:
-        if url_or_id.startswith('http') or 'market.yandex.ru' in url_or_id:
-            product_id = self.extract_product_id(url_or_id)
+        is_url = url_or_id.startswith('http') or 'market.yandex.ru' in url_or_id
+        if is_url:
+            page_url = url_or_id if url_or_id.startswith('http') else f'https://{url_or_id}'
+            try:
+                url_hint = self.extract_product_id(url_or_id)
+            except ValueError:
+                url_hint = None
         else:
-            product_id = url_or_id.strip()
+            url_hint = url_or_id.strip()
+            page_url = self.build_url(url_hint)
 
-        page_url = self.build_url(product_id)
         headers = {
             'User-Agent': get_random_ua(),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -53,37 +57,30 @@ class YandexMarketParser(BaseParser):
             response = await client.get(page_url)
             if response.status_code == 403:
                 raise BlockedError(
-                    f'Yandex Market blocked request for {product_id}'
+                    f'Yandex Market blocked request for {url_hint}'
                 )
             if response.status_code == 404:
                 raise NotFoundError(
-                    f'Yandex Market product {product_id} not found'
+                    f'Yandex Market product {url_hint} not found'
                 )
             response.raise_for_status()
             html = response.text
 
-        tree = HTMLParser(html)
-        for node in tree.css('script[type="application/ld+json"]'):
-            raw_text = node.text(strip=True)
-            if not raw_text:
+        for item in iter_ld_json_products(html):
+            product_id = product_id_from_ld_json(item) or url_hint
+            if product_id is None:
                 continue
-            try:
-                data: Any = json.loads(raw_text)
-            except json.JSONDecodeError:
-                continue
-            items = data if isinstance(data, list) else [data]
-            for item in items:
-                if item.get('@type') in ('Product', 'IndividualProduct'):
-                    return self._extract_from_json_ld(item, product_id)
+            return self._extract_from_json_ld(item, product_id, html)
 
-        raise ParsingError(
-            f'No Product JSON-LD on Yandex Market page for {product_id}'
+        raise NotFoundError(
+            f'Yandex Market product {url_hint} not found (no Product data)'
         )
 
     def _extract_from_json_ld(
         self,
         item: dict[str, Any],
         product_id: str,
+        html: str,
     ) -> ParsedProduct:
         title: str = item.get('name', '')
         offers_raw: Any = item.get('offers', {})
@@ -95,22 +92,21 @@ class YandexMarketParser(BaseParser):
             offers_list = []
 
         price: Decimal | None = None
-        original_price: Decimal | None = None
         in_stock = True
-
         for offer in offers_list:
-            price = price or _parse_price_value(offer.get('price'))
-            original_price = original_price or _parse_price_value(
-                offer.get('highPrice')
-            )
+            price = price or _price_from_offer(offer.get('price'))
             availability = offer.get('availability', '')
             if availability and 'InStock' not in availability:
                 in_stock = False
 
+        patch_price, original_price = extract_offer_prices(html, product_id)
+        price = patch_price or price
         if price is None:
             raise ParsingError(
-                f'No price in Yandex Market JSON-LD for {product_id}'
+                f'No price in Yandex Market data for {product_id}'
             )
+        if original_price is not None and original_price <= price:
+            original_price = None
 
         image_url: str | None = None
         image_raw = item.get('image')
@@ -151,20 +147,18 @@ class YandexMarketParser(BaseParser):
         )
 
 
-_PRICE_CLEAN_RE = re.compile(r'[^\d.,]')
-
-
-def _parse_price_value(raw: Any) -> Decimal | None:
+def _price_from_offer(raw: Any) -> Decimal | None:
     if raw is None:
         return None
     if isinstance(raw, (int, float)):
         return Decimal(str(raw))
     if not isinstance(raw, str):
         return None
-    cleaned = _PRICE_CLEAN_RE.sub('', raw).replace(',', '.')
+    cleaned = ''.join(ch for ch in raw if ch.isdigit() or ch in ',.')
+    cleaned = cleaned.replace(',', '.')
     if not cleaned:
         return None
     try:
         return Decimal(cleaned)
-    except InvalidOperation:
+    except Exception:
         return None

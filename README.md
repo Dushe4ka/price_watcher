@@ -40,13 +40,15 @@ Telegram-сервис для мониторинга цен на маркетпл
 
 | Площадка | Краулер | Парсер | Рейтинг | Статус |
 |----------|---------|--------|---------|--------|
-| **Wildberries** | ✅ v18 search API | ✅ basket CDN + search | ✅ | Основной источник |
-| **Яндекс Маркет** | ⚠️ HTML-регулярки | ❌ SPA, нет JSON-LD | ❌ | Нужен headless-браузер |
-| **Ozon** | ✅ Playwright + entrypoint-api | ✅ widgetStates / tiles | ✅ | Нужен чистый RU egress / `PROXY_LIST` |
+| **Wildberries** | ✅ Playwright (headed) + DOM | ✅ Playwright (headed) + DOM | ✅ | Работает, headed через Xvfb (уже настроено) |
+| **Яндекс Маркет** | ✅ JSON-LD `ItemList` + пагинация | ✅ JSON-LD + apiary-patch | ✅ | Работает без браузера |
+| **Ozon** | ✅ Playwright + entrypoint-api | ✅ widgetStates / tiles | ✅ | ⚠️ Заблокирован без приватного мобильного/residential IP |
 
-**WB** — краулер использует поисковые запросы (`search_queries`) из конфига категорий и извлекает цены, рейтинг и отзывы прямо из ответа API. Парсер одиночных товаров получает базовую информацию через basket CDN и дополняет ценами/рейтингом через search API.
+**WB** — `search.wb.ru` теперь требует proof-of-work антибот-токен (`x-pow`) на каждый запрос — обычный HTTP-клиент (даже с хорошим residential/mobile IP) не проходит. Сам антибот-челлендж WB (`/__wbaas/challenges/antibot/`) не резолвится ни в одном headless-режиме Chromium (ни классическом, ни `--headless=new`, ни со stealth-патчами) — только в **headed**-сессии, независимо от качества IP. На сервере без монитора это решается через Xvfb (`xvfb-run`, см. `Dockerfile.bot`). Краулер и парсер ходят на реальные страницы категорий/товара headed-браузером и читают данные прямо из DOM карточек (`.product-card`, `data-nm-id`, `<ins>`/`<del>` для цены) — без JSON API и без текстового поиска. Логика — `src/wb/` (`session.py` — управление браузером, `client.py` — навигация, `dom_extract.py` — чистый парсинг разметки, тестируется без сети). Smoke: `python -m scripts.smoke_wb_crawl`.
 
-**Ozon** — headless Chromium греет antibot-сессию (`abt_att`), затем читает `entrypoint-api.bx` / `composer-api.bx`. При IP в антибот-бане (VPN/DC) — 403 и страница «нет соединения»; задайте `PROXY_LIST` (RU residential/mobile) и при необходимости `OZON_PROXY_REQUIRED=true`. Лимиты: `OZON_REQUEST_DELAY_SEC`, `OZON_FETCH_RETRIES`, circuit-breaker `OZON_BLOCK_COOLDOWN_SEC`. Smoke: `python -m scripts.smoke_ozon_crawl`.
+**Яндекс Маркет** — страницы по-прежнему рендерятся на сервере (headless-браузер не нужен). URL сменился с `/product/<id>` на `/card/<slug>/<id>`, где `<id>` — это `oskuId` из ссылки, а не поле `sku` в JSON-LD (они совпадают не всегда). Цена «до скидки» отсутствует в JSON-LD `offers` — она берётся из встроенного `<noframes data-apiary="patch">` блока (`collections.offerAnalytics`). Краулер категорий постранично (`?page=N`) собирает товары из JSON-LD `ItemList`. Логика — `src/parsers/ym_api.py` (общие хелперы), `src/parsers/yandex_market.py`, `src/crawlers/yandex_market.py`.
+
+**Ozon** — headless Chromium греет antibot-сессию (`abt_att`), затем читает `entrypoint-api.bx` / `composer-api.bx`. При IP в антибот-бане (VPN/DC/датацентр) — 403 и страница «нет соединения»; задайте `PROXY_LIST` (RU residential/mobile) и при необходимости `OZON_PROXY_REQUIRED=true`. **Важно:** одной «мобильности» IP недостаточно — шэйред-пул мобильных прокси (проверен один из коммерческих сервисов) не прошёл антибот 3/3 попыток, похоже такие пулы уже известны/забанены у Ozon. В отличие от WB, headed-режим Chromium тут тоже не помогает (проверено) — это репутация IP/сессии, а не детект автоматизации. Нужен приватный/выделенный мобильный IP (индивидуальный тариф прокси-провайдера или собственный телефон с SIM). Лимиты: `OZON_REQUEST_DELAY_SEC`, `OZON_FETCH_RETRIES`, circuit-breaker `OZON_BLOCK_COOLDOWN_SEC`. Smoke: `python -m scripts.smoke_ozon_crawl`.
 
 **Почему скидок может быть 0:** скидка по истории БД появляется после нескольких дней обходов (`DATA_COLLECTION_WARMUP_DAYS`).
 
@@ -166,6 +168,12 @@ docker compose logs -f telegram_bot   # логи бота
 | `OZON_REQUEST_DELAY_SEC` | `0.5` | пауза между запросами Ozon |
 | `OZON_FETCH_RETRIES` | `3` | ретраи + ротация прокси при 403 |
 | `OZON_BLOCK_COOLDOWN_SEC` | `120` | cooldown после серии antibot-блоков |
+| `WB_PROXY_REQUIRED` | `false` | не ходить в WB без `PROXY_LIST` |
+| `WB_BROWSER_IDLE_SEC` | `600` | простой браузерной сессии WB до закрытия |
+| `WB_REQUEST_DELAY_SEC` | `1.0` | пауза между запросами WB |
+| `WB_CHALLENGE_TIMEOUT_SEC` | `20` | таймаут ожидания antibot-челленджа WB |
+| `WB_FETCH_RETRIES` | `3` | ретраи + ротация прокси при блоке WB |
+| `WB_BLOCK_COOLDOWN_SEC` | `120` | cooldown после серии antibot-блоков WB |
 | `CATEGORIES_CONFIG_PATH` | `config/monitored_categories.yaml` | категории |
 
 > Админ должен написать боту `/start`, иначе модерация в ЛС не дойдёт.
@@ -214,17 +222,14 @@ categories:
     name: Бьюти
     marketplaces:
       - marketplace: yandex_market
-        crawl_url: https://market.yandex.ru/catalog--krasota/54734/list
+        crawl_url: https://market.yandex.ru/category/tovary-dlya-krasoty
       - marketplace: wildberries
-        crawl_url: https://www.wildberries.ru/catalog/krasota
-        search_queries:
-          - "крем для лица"
-          - "тушь для ресниц"
+        crawl_url: https://www.wildberries.ru/catalog/krasota/aptechnaya-kosmetika
       - marketplace: ozon
         crawl_url: /category/krasota-i-zdorove-6500/
 ```
 
-> **WB** использует `search_queries` для поиска через v18 API. `crawl_url` выступает как fallback-идентификатор категории.
+> **WB и ЯМ**: `crawl_url` должен вести на страницу с реальным списком товаров, а не на «хаб» с плитками подкатегорий (например, `/catalog/krasota` у WB или `/catalog--slug/<id>/list` со старым числовым ID у ЯМ — оба варианта отдают 0 товаров). Проверяйте новую категорию вручную перед добавлением в конфиг: у WB и ЯМ числовые ID и верхнеуровневые разделы время от времени «уезжают» на другой контент.
 
 ---
 
@@ -272,7 +277,7 @@ bot/
 
 ## Стек
 
-FastAPI · SQLAlchemy 2.0 · Alembic · PostgreSQL · python-telegram-bot 22 · APScheduler · httpx · selectolax · Docker
+FastAPI · SQLAlchemy 2.0 · Alembic · PostgreSQL · python-telegram-bot 22 · APScheduler · httpx · Playwright · Docker
 
 ---
 

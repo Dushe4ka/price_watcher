@@ -17,18 +17,22 @@ from playwright.async_api import (
 
 from src.core.browser_proxy import STEALTH_INIT_SCRIPT, playwright_proxy_config
 from src.core.config import settings
-from src.ozon.constants import (
-    OZON_CHALLENGE_TITLE_MARKERS,
-    OZON_DESKTOP_UA,
-    OZON_HOME_URL,
-)
 from src.parsers.utils import BlockedError
+from src.wb.constants import WB_DESKTOP_UA
 
 logger = logging.getLogger(__name__)
 
+# WB's own antibot challenge (`/__wbaas/challenges/antibot/...`) reliably
+# stalls forever under *any* headless Chromium mode (plain, --headless=new,
+# with or without stealth patches) even from a clean residential IP — but
+# resolves in a couple of seconds under a real headed session. So this
+# session always launches headed; on a display-less server that means
+# Chromium must run under Xvfb (see Dockerfile.bot).
+_PLACEHOLDER_TITLES = ('', '...')
 
-class OzonBrowserSession:
-    """Playwright Chromium session with antibot warmup and proxy rotation."""
+
+class WBBrowserSession:
+    """Headed Playwright Chromium session with antibot wait + proxy rotation."""
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -54,7 +58,6 @@ class OzonBrowserSession:
             return self._page
 
     async def rotate_and_restart(self) -> Page:
-        """Close browser, advance proxy, open a fresh warmed session."""
         async with self._lock:
             await self._respect_cooldown()
             await self._close_inner()
@@ -63,14 +66,32 @@ class OzonBrowserSession:
             assert self._page is not None
             return self._page
 
+    async def goto_and_wait(self, page: Page, url: str) -> None:
+        """Navigate and wait out WB's antibot challenge (headed sessions
+        usually clear it in 2-8s; a cold, never-warmed IP can take longer)."""
+        await page.goto(url, wait_until='domcontentloaded', timeout=45_000)
+        deadline = time.monotonic() + settings.wb_challenge_timeout_sec
+        while time.monotonic() < deadline:
+            try:
+                title = await page.title()
+            except PlaywrightError:
+                # Mid-navigation (the challenge JS reloads the page) — retry.
+                await page.wait_for_timeout(300)
+                continue
+            if title not in _PLACEHOLDER_TITLES:
+                return
+            await page.wait_for_timeout(500)
+
+        raise BlockedError(f'WB antibot challenge did not resolve for {url}')
+
     def note_block(self) -> None:
         self._consecutive_blocks += 1
-        max_blocks = settings.ozon_max_consecutive_blocks
+        max_blocks = settings.wb_max_consecutive_blocks
         if self._consecutive_blocks >= max_blocks:
-            cooldown = settings.ozon_block_cooldown_sec
+            cooldown = settings.wb_block_cooldown_sec
             self._cooldown_until = time.monotonic() + cooldown
             logger.warning(
-                'Ozon circuit open after %s blocks; cooldown %ss',
+                'WB circuit open after %s blocks; cooldown %ss',
                 self._consecutive_blocks,
                 cooldown,
             )
@@ -89,23 +110,20 @@ class OzonBrowserSession:
         if remaining <= 0:
             return
         raise BlockedError(
-            f'Ozon circuit open for {remaining:.0f}s more '
-            f'(anti-bot cooldown)'
+            f'WB circuit open for {remaining:.0f}s more (anti-bot cooldown)'
         )
 
     async def _start_fresh(self) -> None:
-        if settings.ozon_proxy_required and not settings.proxies:
-            raise BlockedError(
-                'OZON_PROXY_REQUIRED=true but PROXY_LIST is empty'
-            )
+        if settings.wb_proxy_required and not settings.proxies:
+            raise BlockedError('WB_PROXY_REQUIRED=true but PROXY_LIST is empty')
 
         logger.info(
-            'Starting Ozon browser session (proxy=%s)',
+            'Starting WB browser session (proxy=%s)',
             'yes' if self._pick_proxy() else 'no',
         )
         self._playwright = await async_playwright().start()
         launch_kwargs: dict[str, Any] = {
-            'headless': True,
+            'headless': False,
             'args': [
                 '--no-sandbox',
                 '--disable-dev-shm-usage',
@@ -131,61 +149,14 @@ class OzonBrowserSession:
             locale='ru-RU',
             timezone_id='Europe/Moscow',
             viewport={'width': 1440, 'height': 900},
-            user_agent=OZON_DESKTOP_UA,
+            user_agent=WB_DESKTOP_UA,
             extra_http_headers={
                 'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
             },
         )
         await self._context.add_init_script(STEALTH_INIT_SCRIPT)
         self._page = await self._context.new_page()
-        await self._warm_antibot(self._page)
         self._last_used_monotonic = time.monotonic()
-
-    async def _warm_antibot(self, page: Page) -> None:
-        await page.goto(OZON_HOME_URL, wait_until='domcontentloaded', timeout=60_000)
-        deadline = time.monotonic() + settings.ozon_challenge_timeout_sec
-        while time.monotonic() < deadline:
-            if await self._challenge_passed(page):
-                logger.info('Ozon antibot challenge passed (%s)', page.url)
-                return
-            if await self._is_hard_fail_page(page):
-                try:
-                    btn = page.get_by_text('Обновить страницу')
-                    if await btn.count():
-                        await btn.first.click(timeout=2000)
-                        await page.wait_for_timeout(1500)
-                        continue
-                except Exception:
-                    pass
-                await page.reload(wait_until='domcontentloaded')
-            await page.wait_for_timeout(500)
-
-        title = await page.title()
-        raise BlockedError(
-            f'Ozon antibot challenge failed: title={title!r} url={page.url}'
-        )
-
-    async def _challenge_passed(self, page: Page) -> bool:
-        title = (await page.title()).lower()
-        if any(marker in title for marker in OZON_CHALLENGE_TITLE_MARKERS):
-            return False
-        url = page.url
-        if 'abt_att=' in url:
-            return True
-        try:
-            body = await page.inner_text('body')
-        except Exception:
-            return False
-        if 'Инцидент' in body and 'нет' in body.lower():
-            return False
-        return 'Каталог' in body or 'OZON' in (await page.title()).upper()
-
-    async def _is_hard_fail_page(self, page: Page) -> bool:
-        title = (await page.title()).lower()
-        return any(
-            marker in title
-            for marker in ('нет соединения', 'нет\xa0соединения')
-        )
 
     def _pick_proxy(self) -> str | None:
         proxies = settings.proxies
@@ -205,15 +176,15 @@ class OzonBrowserSession:
         if self._proxy_cycle is None:
             self._proxy_cycle = itertools.cycle(proxies)
         self._current_proxy = next(self._proxy_cycle)
-        logger.info('Rotating Ozon proxy')
+        logger.info('Rotating WB proxy')
 
     async def _close_if_idle(self) -> None:
         if self._page is None:
             return
         idle_sec = time.monotonic() - self._last_used_monotonic
-        if idle_sec < settings.ozon_browser_idle_sec:
+        if idle_sec < settings.wb_browser_idle_sec:
             return
-        logger.info('Closing idle Ozon browser session')
+        logger.info('Closing idle WB browser session')
         await self._close_inner()
 
     async def _close_inner(self) -> None:

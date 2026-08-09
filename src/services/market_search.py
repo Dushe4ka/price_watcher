@@ -1,22 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 from decimal import Decimal
-from typing import Any
 from urllib.parse import quote
 
 from src.ozon.client import ozon_client
 from src.parsers import get_parser
 from src.parsers.base import ParsedProduct
 from src.parsers.utils import NotFoundError, ParserError, create_http_client
-from src.parsers.wb_api import (
-    products_from_search_payload,
-    wb_search_headers,
-    wb_search_urls,
-)
+from src.wb.client import wb_client
+from src.wb.constants import build_search_url
 
 logger = logging.getLogger(__name__)
 
@@ -142,21 +137,10 @@ async def fetch_market_prices(
 
 
 async def _search_wildberries(query: str, limit: int) -> list[str]:
-    headers = wb_search_headers(query)
-    async with create_http_client() as client:
-        for url in wb_search_urls(query, page=1):
-            response = await client.get(url, headers=headers)
-            if response.status_code != 200:
-                continue
-            try:
-                data: dict[str, Any] = response.json()
-            except json.JSONDecodeError:
-                continue
-            products = products_from_search_payload(data)
-            ids = [str(item['id']) for item in products if item.get('id')]
-            if ids:
-                return ids[:limit]
-    return []
+    product_ids, _ = await wb_client.category_products(
+        build_search_url(query), limit,
+    )
+    return product_ids
 
 
 async def _search_ozon(query: str, limit: int) -> list[str]:
