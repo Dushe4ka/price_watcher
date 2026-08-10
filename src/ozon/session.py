@@ -6,7 +6,7 @@ import logging
 import time
 from typing import Any
 
-from playwright.async_api import (
+from patchright.async_api import (
     Browser,
     BrowserContext,
     Error as PlaywrightError,
@@ -28,7 +28,14 @@ logger = logging.getLogger(__name__)
 
 
 class OzonBrowserSession:
-    """Playwright Chromium session with antibot warmup and proxy rotation."""
+    """Patchright (undetected Playwright fork) Chrome session with antibot
+    warmup and proxy rotation. Plain Playwright's CDP fingerprint
+    (Runtime.enable leak, --enable-automation, etc.) gets flagged by Ozon's
+    antibot even from a clean private mobile IP in both headless and headed
+    mode — patchright patches those CDP-level tells directly. Headed + the
+    real "chrome" channel (not bundled Chromium) is patchright's own
+    recommended stealth configuration, so this session no longer offers a
+    headless mode."""
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -105,7 +112,8 @@ class OzonBrowserSession:
         )
         self._playwright = await async_playwright().start()
         launch_kwargs: dict[str, Any] = {
-            'headless': True,
+            'headless': False,
+            'channel': 'chrome',
             'args': [
                 '--no-sandbox',
                 '--disable-dev-shm-usage',

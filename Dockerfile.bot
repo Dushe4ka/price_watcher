@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install chromium
+RUN patchright install chrome
 
 COPY src ./src
 COPY bot ./bot
@@ -41,6 +42,8 @@ COPY alembic.ini .
 COPY alembic ./alembic
 
 # WB's antibot challenge stalls forever under headless Chromium (any mode) but
-# resolves in a couple of seconds under a real headed session — xvfb-run gives
-# Chromium a virtual display so it can run headed without a physical monitor.
+# resolves in a couple of seconds under a real headed session; Ozon's
+# patchright/Chrome session also runs headed (its own stealth recommendation)
+# — xvfb-run gives both a virtual display so they can run headed without a
+# physical monitor.
 CMD ["xvfb-run", "-a", "python", "-m", "bot.main"]
