@@ -42,13 +42,15 @@ Telegram-сервис для мониторинга цен на маркетпл
 |----------|---------|--------|---------|--------|
 | **Wildberries** | ✅ Playwright (headed) + DOM | ✅ Playwright (headed) + DOM | ✅ | Работает, headed через Xvfb (уже настроено) |
 | **Яндекс Маркет** | ✅ JSON-LD `ItemList` + пагинация | ✅ JSON-LD + apiary-patch | ✅ | Работает без браузера |
-| **Ozon** | ✅ Playwright + entrypoint-api | ✅ widgetStates / tiles | ✅ | ⚠️ Заблокирован без приватного мобильного/residential IP |
+| **Ozon** | ✅ patchright + entrypoint-api | ✅ widgetStates / tiles | ✅ | ⚠️ Всё ещё заблокирован антиботом даже с приватным мобильным IP |
 
 **WB** — `search.wb.ru` теперь требует proof-of-work антибот-токен (`x-pow`) на каждый запрос — обычный HTTP-клиент (даже с хорошим residential/mobile IP) не проходит. Сам антибот-челлендж WB (`/__wbaas/challenges/antibot/`) не резолвится ни в одном headless-режиме Chromium (ни классическом, ни `--headless=new`, ни со stealth-патчами) — только в **headed**-сессии, независимо от качества IP. На сервере без монитора это решается через Xvfb (`xvfb-run`, см. `Dockerfile.bot`). Краулер и парсер ходят на реальные страницы категорий/товара headed-браузером и читают данные прямо из DOM карточек (`.product-card`, `data-nm-id`, `<ins>`/`<del>` для цены) — без JSON API и без текстового поиска. Логика — `src/wb/` (`session.py` — управление браузером, `client.py` — навигация, `dom_extract.py` — чистый парсинг разметки, тестируется без сети). Smoke: `python -m scripts.smoke_wb_crawl`.
 
 **Яндекс Маркет** — страницы по-прежнему рендерятся на сервере (headless-браузер не нужен). URL сменился с `/product/<id>` на `/card/<slug>/<id>`, где `<id>` — это `oskuId` из ссылки, а не поле `sku` в JSON-LD (они совпадают не всегда). Цена «до скидки» отсутствует в JSON-LD `offers` — она берётся из встроенного `<noframes data-apiary="patch">` блока (`collections.offerAnalytics`). Краулер категорий постранично (`?page=N`) собирает товары из JSON-LD `ItemList`. Логика — `src/parsers/ym_api.py` (общие хелперы), `src/parsers/yandex_market.py`, `src/crawlers/yandex_market.py`.
 
-**Ozon** — headless Chromium греет antibot-сессию (`abt_att`), затем читает `entrypoint-api.bx` / `composer-api.bx`. При IP в антибот-бане (VPN/DC/датацентр) — 403 и страница «нет соединения»; задайте `PROXY_LIST` (RU residential/mobile) и при необходимости `OZON_PROXY_REQUIRED=true`. **Важно:** одной «мобильности» IP недостаточно — шэйред-пул мобильных прокси (проверен один из коммерческих сервисов) не прошёл антибот 3/3 попыток, похоже такие пулы уже известны/забанены у Ozon. В отличие от WB, headed-режим Chromium тут тоже не помогает (проверено) — это репутация IP/сессии, а не детект автоматизации. Нужен приватный/выделенный мобильный IP (индивидуальный тариф прокси-провайдера или собственный телефон с SIM). Лимиты: `OZON_REQUEST_DELAY_SEC`, `OZON_FETCH_RETRIES`, circuit-breaker `OZON_BLOCK_COOLDOWN_SEC`. Smoke: `python -m scripts.smoke_ozon_crawl`.
+**Ozon** — сессия на [patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) (форк Playwright с патчами против CDP-детекта: `Runtime.enable`, `--enable-automation` и т.п.), headed, канал `chrome` (настоящий Google Chrome, не bundled Chromium), персистентный профиль (`OZON_PROFILE_DIR`, в проде — Docker volume) вместо одноразового — по рекомендациям patchright это главный рычаг стелса, важнее самого канала `chrome`. Затем читает `entrypoint-api.bx` / `composer-api.bx`.
+
+**Статус на 2026-08-10: всё ещё заблокирован.** Проверено вживую (реальный VPS + приватная мобильная SIM через SSH-туннель, не шэйред-прокси): ни один вариант не даёт полного прохода — обычный Playwright (headless и headed) на этом IP давал `Antibot Captcha`, patchright с headed+`channel=chrome` на том же IP дал ровно то же самое. Значит дело не только в IP и не только в CDP-детекте по отдельности — возможно, поможет именно «состаренный» персистентный профиль (нужно время, не проверяется одним прогоном), возможно — нет. `PROXY_LIST` (RU residential/mobile) и `OZON_PROXY_REQUIRED=true` — по прежнему нужны, просто уже недостаточны сами по себе. Автоматическое решение капчи не реализовано и не планируется (это уже обход прямой человеческой верификации, а не просто маскировка). Лимиты: `OZON_REQUEST_DELAY_SEC`, `OZON_FETCH_RETRIES`, circuit-breaker `OZON_BLOCK_COOLDOWN_SEC`. Smoke: `python -m scripts.smoke_ozon_crawl`.
 
 **Почему скидок может быть 0:** скидка по истории БД появляется после нескольких дней обходов (`DATA_COLLECTION_WARMUP_DAYS`).
 
@@ -168,6 +170,7 @@ docker compose logs -f telegram_bot   # логи бота
 | `OZON_REQUEST_DELAY_SEC` | `0.5` | пауза между запросами Ozon |
 | `OZON_FETCH_RETRIES` | `3` | ретраи + ротация прокси при 403 |
 | `OZON_BLOCK_COOLDOWN_SEC` | `120` | cooldown после серии antibot-блоков |
+| `OZON_PROFILE_DIR` | `.ozon-profile` | директория персистентного Chrome-профиля (смонтировать как volume в проде) |
 | `WB_PROXY_REQUIRED` | `false` | не ходить в WB без `PROXY_LIST` |
 | `WB_BROWSER_IDLE_SEC` | `600` | простой браузерной сессии WB до закрытия |
 | `WB_REQUEST_DELAY_SEC` | `1.0` | пауза между запросами WB |

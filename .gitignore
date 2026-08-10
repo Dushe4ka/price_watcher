@@ -122,6 +122,9 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# Ozon persistent browser profile (patchright launch_persistent_context)
+.ozon-profile/
+
 # Environments
 .env
 .env.*

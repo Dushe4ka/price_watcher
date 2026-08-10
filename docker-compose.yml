@@ -3,6 +3,7 @@ version: '3.9'
 volumes:
   pg_data:
   static:
+  ozon_profile:
 
 services:
   api:
@@ -36,6 +37,7 @@ services:
     volumes:
       - static:/app/media
       - ./config:/app/config:ro
+      - ozon_profile:/app/.ozon-profile
   nginx:
     build:
       context: ./nginx

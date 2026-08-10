@@ -4,10 +4,10 @@ import asyncio
 import itertools
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 from patchright.async_api import (
-    Browser,
     BrowserContext,
     Error as PlaywrightError,
     Page,
@@ -29,18 +29,26 @@ logger = logging.getLogger(__name__)
 
 class OzonBrowserSession:
     """Patchright (undetected Playwright fork) Chrome session with antibot
-    warmup and proxy rotation. Plain Playwright's CDP fingerprint
-    (Runtime.enable leak, --enable-automation, etc.) gets flagged by Ozon's
-    antibot even from a clean private mobile IP in both headless and headed
-    mode — patchright patches those CDP-level tells directly. Headed + the
-    real "chrome" channel (not bundled Chromium) is patchright's own
-    recommended stealth configuration, so this session no longer offers a
-    headless mode."""
+    warmup and proxy rotation.
+
+    Plain Playwright's CDP fingerprint (Runtime.enable leak,
+    --enable-automation, etc.) gets flagged by Ozon's antibot even from a
+    clean private mobile IP in both headless and headed mode — patchright
+    patches those CDP-level tells directly. Headed + the real "chrome"
+    channel (not bundled Chromium) is patchright's own recommended stealth
+    configuration, so this session no longer offers a headless mode.
+
+    Uses ``launch_persistent_context`` against a durable profile directory
+    (``OZON_PROFILE_DIR``, mounted as a Docker volume in prod) rather than a
+    fresh throwaway profile per run — patchright's docs list a
+    real/aged profile as the top stealth lever, above the "chrome" channel
+    alone. A brand-new run still looks like a brand-new browser; the payoff
+    is cumulative across real runs over time.
+    """
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._playwright: Playwright | None = None
-        self._browser: Browser | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._last_used_monotonic = 0.0
@@ -111,9 +119,20 @@ class OzonBrowserSession:
             'yes' if self._pick_proxy() else 'no',
         )
         self._playwright = await async_playwright().start()
+        profile_dir = Path(settings.ozon_profile_dir).expanduser().resolve()
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
         launch_kwargs: dict[str, Any] = {
+            'user_data_dir': str(profile_dir),
             'headless': False,
             'channel': 'chrome',
+            'no_viewport': True,
+            'locale': 'ru-RU',
+            'timezone_id': 'Europe/Moscow',
+            'user_agent': OZON_DESKTOP_UA,
+            'extra_http_headers': {
+                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            },
             'args': [
                 '--no-sandbox',
                 '--disable-dev-shm-usage',
@@ -126,7 +145,9 @@ class OzonBrowserSession:
             launch_kwargs['proxy'] = playwright_proxy_config(proxy)
 
         try:
-            self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                **launch_kwargs,
+            )
         except PlaywrightError as exc:
             if 'socks5 proxy authentication' in str(exc).lower():
                 raise BlockedError(
@@ -135,17 +156,12 @@ class OzonBrowserSession:
                     'unauthenticated (IP-whitelisted) SOCKS5 proxy instead.'
                 ) from exc
             raise
-        self._context = await self._browser.new_context(
-            locale='ru-RU',
-            timezone_id='Europe/Moscow',
-            viewport={'width': 1440, 'height': 900},
-            user_agent=OZON_DESKTOP_UA,
-            extra_http_headers={
-                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-            },
-        )
         await self._context.add_init_script(STEALTH_INIT_SCRIPT)
-        self._page = await self._context.new_page()
+        self._page = (
+            self._context.pages[0]
+            if self._context.pages
+            else await self._context.new_page()
+        )
         await self._warm_antibot(self._page)
         self._last_used_monotonic = time.monotonic()
 
@@ -235,15 +251,12 @@ class OzonBrowserSession:
         await self._close_inner()
 
     async def _close_inner(self) -> None:
-        if self._page is not None and not self._page.is_closed():
-            await self._page.close()
+        # Closing a persistent context also tears down its browser process —
+        # no separate Browser handle to close here.
         if self._context is not None:
             await self._context.close()
-        if self._browser is not None:
-            await self._browser.close()
         if self._playwright is not None:
             await self._playwright.stop()
         self._page = None
         self._context = None
-        self._browser = None
         self._playwright = None
