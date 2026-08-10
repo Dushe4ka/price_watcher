@@ -166,7 +166,11 @@ class OzonBrowserSession:
         )
 
     async def _challenge_passed(self, page: Page) -> bool:
-        title = (await page.title()).lower()
+        try:
+            title = (await page.title()).lower()
+        except PlaywrightError:
+            # Mid-navigation (challenge JS is reloading the page) — retry.
+            return False
         if any(marker in title for marker in OZON_CHALLENGE_TITLE_MARKERS):
             return False
         url = page.url
@@ -178,10 +182,16 @@ class OzonBrowserSession:
             return False
         if 'Инцидент' in body and 'нет' in body.lower():
             return False
-        return 'Каталог' in body or 'OZON' in (await page.title()).upper()
+        try:
+            return 'Каталог' in body or 'OZON' in (await page.title()).upper()
+        except PlaywrightError:
+            return False
 
     async def _is_hard_fail_page(self, page: Page) -> bool:
-        title = (await page.title()).lower()
+        try:
+            title = (await page.title()).lower()
+        except PlaywrightError:
+            return False
         return any(
             marker in title
             for marker in ('нет соединения', 'нет\xa0соединения')
