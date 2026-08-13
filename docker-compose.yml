@@ -34,6 +34,8 @@ services:
         condition: service_healthy
       api:
         condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - static:/app/media
       - ./config:/app/config:ro
