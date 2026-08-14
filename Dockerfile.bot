@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     xvfb \
     xauth \
+    tini \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -39,6 +40,7 @@ RUN patchright install chrome
 COPY src ./src
 COPY bot ./bot
 COPY config ./config
+COPY scripts ./scripts
 COPY alembic.ini .
 COPY alembic ./alembic
 
@@ -47,4 +49,10 @@ COPY alembic ./alembic
 # patchright/Chrome session also runs headed (its own stealth recommendation)
 # — xvfb-run gives both a virtual display so they can run headed without a
 # physical monitor.
+#
+# tini as PID 1 is required, not cosmetic: xvfb-run's internal `wait` for
+# Xvfb's readiness signal relies on real signal delivery, which the kernel
+# handles differently for PID 1 than for any other process — without a proper
+# init in front of it, xvfb-run hangs forever before ever launching Python.
+ENTRYPOINT ["tini", "--"]
 CMD ["xvfb-run", "-a", "python", "-m", "bot.main"]
