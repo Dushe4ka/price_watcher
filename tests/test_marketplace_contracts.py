@@ -52,6 +52,27 @@ class RequestContractTests(unittest.TestCase):
 
 
 class SourceResultTests(unittest.TestCase):
+    def test_transport_attempts_accepts_zero_and_rejects_negative(
+        self,
+    ) -> None:
+        attempt = SourceAttempt(
+            source=SourceName.PUBLIC,
+            outcome=SourceOutcome.TRANSPORT_ERROR,
+            duration_ms=0,
+            item_count=0,
+            transport_attempts=0,
+        )
+
+        self.assertEqual(0, attempt.transport_attempts)
+        with self.assertRaisesRegex(ValueError, 'not be negative'):
+            SourceAttempt(
+                source=SourceName.PUBLIC,
+                outcome=SourceOutcome.TRANSPORT_ERROR,
+                duration_ms=0,
+                item_count=0,
+                transport_attempts=-1,
+            )
+
     def test_failure_cannot_carry_value(self) -> None:
         with self.assertRaises(ValueError):
             SourceResult(

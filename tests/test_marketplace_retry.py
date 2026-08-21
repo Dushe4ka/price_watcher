@@ -156,7 +156,7 @@ class SourceRetryExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, second_calls)
         self.assertEqual([], delays)
         self.assertEqual(SourceOutcome.TRANSPORT_ERROR, result.outcome)
-        self.assertEqual(1, result.attempt.transport_attempts)
+        self.assertEqual(0, result.attempt.transport_attempts)
 
     async def test_non_retriable_outcomes_are_called_once(self) -> None:
         cases = (

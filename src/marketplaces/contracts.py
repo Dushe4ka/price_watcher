@@ -69,8 +69,8 @@ class SourceAttempt:
             raise ValueError('duration_ms must not be negative')
         if self.item_count < 0:
             raise ValueError('item_count must not be negative')
-        if self.transport_attempts < 1:
-            raise ValueError('transport_attempts must be at least 1')
+        if self.transport_attempts < 0:
+            raise ValueError('transport_attempts must not be negative')
 
 
 @dataclass(frozen=True, slots=True)

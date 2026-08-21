@@ -8,7 +8,7 @@ from src.marketplaces.contracts import (
     SourceName,
     SourceOutcome,
     SourceResult,
-    source_failure,
+    SourceAttempt,
 )
 from src.marketplaces.errors import SafeErrorCode
 from src.marketplaces.fallback import SourceCall
@@ -97,10 +97,18 @@ def _can_retry(
 
 
 def _deadline_expired_result(source: SourceName) -> SourceResult[None]:
-    return source_failure(
-        source,
-        SourceOutcome.TRANSPORT_ERROR,
-        SafeErrorCode.TRANSPORT_FAILED,
+    return SourceResult(
+        source=source,
+        outcome=SourceOutcome.TRANSPORT_ERROR,
+        value=None,
+        attempt=SourceAttempt(
+            source=source,
+            outcome=SourceOutcome.TRANSPORT_ERROR,
+            duration_ms=0,
+            item_count=0,
+            error_code=SafeErrorCode.TRANSPORT_FAILED,
+            transport_attempts=0,
+        ),
     )
 
 
