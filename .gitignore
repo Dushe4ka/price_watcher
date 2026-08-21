@@ -146,6 +146,11 @@ Thumbs.db
 # Docker / local data
 docker-compose.override.yml
 
+# Repository hygiene
+node_modules/
+*.sqlite*
+.ruff_cache/
+
 # Logs and runtime
 *.log
 logs/
@@ -183,4 +188,3 @@ cython_debug/
 .vscode/
 /media/
 *.db
-

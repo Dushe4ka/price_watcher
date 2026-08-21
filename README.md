@@ -142,6 +142,23 @@ docker compose logs -f telegram_bot   # логи бота
 
 Скопируйте `.env.example` → `.env`.
 
+### Безопасность репозитория и Docker
+
+`.env` и его локальные варианты не коммитятся и не попадают в Docker build
+context или слои образа: передавайте значения контейнеру через Docker Compose
+или механизм секретов целевой среды. В репозитории остаётся только
+`.env.example` с безопасными placeholders.
+
+Перед коммитом baseline можно проверить без чтения содержимого `.env`:
+
+```bash
+python -m scripts.repository_hygiene
+```
+
+Команда проверяет список отслеживаемых Git-файлов, Dockerfile и
+`.dockerignore`; она завершается с ненулевым кодом при секретах, runtime
+artifacts или небезопасном Docker context.
+
 ### Telegram
 
 | Переменная | Описание |

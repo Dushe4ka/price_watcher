@@ -12,6 +12,14 @@
 - Docker Compose: `db`, `api`, `telegram_bot`, `nginx`
 - Settings, `.env.example`, миграции Alembic
 
+### Baseline репозитория и Docker ✅
+- `.env` и варианты `.env.*` исключены из Git и Docker build context;
+  отслеживается только безопасный `.env.example`.
+- `Dockerfile.api` не копирует environment-файлы в image layers. Runtime
+  получает конфигурацию через окружение контейнера.
+- `python -m scripts.repository_hygiene` проверяет tracked secrets/runtime
+  artifacts, Dockerfile и `.dockerignore` без чтения `.env`.
+
 ### Фаза 1 — Парсеры карточек ✅
 - `src/parsers/`: WB, Ozon, Yandex Market
 - `ParsedProduct`: цена, original_price, discount_percent
