@@ -12,7 +12,11 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from src.marketplaces.contracts import MarketplaceName, SourceName
+from src.marketplaces.contracts import (
+    MarketplaceName,
+    MarketplaceOperation,
+    SourceName,
+)
 
 DEFAULT_APP_TITLE = 'Price Watcher'
 DEFAULT_APP_DESCRIPTION = 'Сервис для просмотра цен.'
@@ -125,9 +129,15 @@ class Settings(BaseSettings):
             'APIFY_API_TOKEN',
         ),
     )
-    apify_wildberries_actor_id: str = ''
-    apify_ozon_actor_id: str = ''
-    apify_yandex_market_actor_id: str = ''
+    apify_wildberries_crawl_category_actor_id: str = ''
+    apify_wildberries_parse_product_actor_id: str = ''
+    apify_wildberries_search_products_actor_id: str = ''
+    apify_ozon_crawl_category_actor_id: str = ''
+    apify_ozon_parse_product_actor_id: str = ''
+    apify_ozon_search_products_actor_id: str = ''
+    apify_yandex_market_crawl_category_actor_id: str = ''
+    apify_yandex_market_parse_product_actor_id: str = ''
+    apify_yandex_market_search_products_actor_id: str = ''
     captcha_adapter_mode: CaptchaAdapterMode = 'disabled'
     ohmycaptcha_api_key: SecretStr = SecretStr('')
     smartcaptcha_mode: SmartCaptchaMode = 'disabled'
@@ -189,6 +199,17 @@ class Settings(BaseSettings):
         source_value = getattr(self, f'{marketplace}_source_chain')
         default = _DEFAULT_SOURCE_CHAINS[marketplace]
         return parse_source_chain(source_value, default)
+
+    def apify_actor_id(
+        self,
+        marketplace: MarketplaceName,
+        operation: MarketplaceOperation,
+    ) -> str:
+        """Return only the configured actor for one marketplace operation."""
+        if marketplace not in _MARKETPLACES:
+            raise ValueError(f'unsupported marketplace: {marketplace}')
+        field_name = f'apify_{marketplace}_{operation.value}_actor_id'
+        return getattr(self, field_name)
 
     def profile_dir(
         self,
