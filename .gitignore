@@ -150,6 +150,8 @@ docker-compose.override.yml
 node_modules/
 *.sqlite*
 .ruff_cache/
+profile_default/
+graphify-out/
 
 # Logs and runtime
 *.log

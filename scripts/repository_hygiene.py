@@ -17,6 +17,26 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable, Sequence
 
 
+VIRTUAL_ENVIRONMENT_DIRECTORIES = frozenset(
+    {
+        '.venv',
+        '.bot_venv',
+        '.backend_venv',
+        'env',
+        'venv',
+        'ENV',
+        'env.bak',
+        'venv.bak',
+    }
+)
+TOOL_CACHE_DIRECTORIES = frozenset({'.pytest_cache', '.ruff_cache'})
+RUNTIME_PROFILE_DIRECTORIES = frozenset({'.ozon-profile', 'profile_default'})
+GRAPH_ARTIFACT_DIRECTORIES = frozenset({'graphify-out'})
+ENVIRONMENT_VARIANT_PATTERNS = frozenset(
+    {'.env.*', '.env*', '**/.env.*', '**/.env*'}
+)
+
+
 @dataclass(frozen=True)
 class Violation:
     """A repository input that must not reach version control or Docker."""
@@ -77,11 +97,41 @@ def _tracked_artifact_violation(path: PurePosixPath) -> Violation | None:
                 'manager.'
             ),
         )
+    if _contains_directory(path, VIRTUAL_ENVIRONMENT_DIRECTORIES):
+        return Violation(
+            kind='tracked_virtual_environment',
+            path=normalized_path,
+            message='Virtual environments must not be tracked.',
+        )
     if '.sqlite' in name:
         return Violation(
             kind='tracked_sqlite_artifact',
             path=normalized_path,
             message='SQLite runtime artifacts must not be tracked.',
+        )
+    if name.endswith('.db'):
+        return Violation(
+            kind='tracked_database_artifact',
+            path=normalized_path,
+            message='Database runtime artifacts must not be tracked.',
+        )
+    if _contains_directory(path, TOOL_CACHE_DIRECTORIES):
+        return Violation(
+            kind='tracked_tool_cache',
+            path=normalized_path,
+            message='Tool caches must not be tracked.',
+        )
+    if _contains_directory(path, RUNTIME_PROFILE_DIRECTORIES):
+        return Violation(
+            kind='tracked_runtime_profile',
+            path=normalized_path,
+            message='Runtime browser profiles must not be tracked.',
+        )
+    if _contains_directory(path, GRAPH_ARTIFACT_DIRECTORIES):
+        return Violation(
+            kind='tracked_graph_artifact',
+            path=normalized_path,
+            message='Generated graph artifacts must not be tracked.',
         )
     if '__pycache__' in path.parts or name.endswith(('.pyc', '.pyo')):
         return Violation(
@@ -183,12 +233,25 @@ def _docker_instructions(content: str) -> Iterable[str]:
 
 def _environment_files_in_context(dockerignore: Path) -> list[str]:
     rules = _dockerignore_rules(dockerignore)
-    candidates = ['.env', '.env.local']
-    return [
-        candidate
-        for candidate in candidates
-        if not _is_dockerignore_excluded(candidate, rules)
-    ]
+    exposed_names: list[str] = []
+    if not _is_dockerignore_excluded('.env', rules):
+        exposed_names.append('.env')
+    if not _dockerignore_excludes_environment_variants(rules):
+        exposed_names.append('.env.*')
+    return exposed_names
+
+
+def _dockerignore_excludes_environment_variants(rules: Sequence[str]) -> bool:
+    excluded = False
+    for rule in rules:
+        negated = rule.startswith('!')
+        pattern = rule[1:] if negated else rule
+        normalized = pattern.strip('/').rstrip('/')
+        if normalized in ENVIRONMENT_VARIANT_PATTERNS:
+            excluded = not negated
+        elif negated and _is_environment_file(PurePosixPath(normalized).name):
+            excluded = False
+    return excluded
 
 
 def _dockerignore_rules(dockerignore: Path) -> list[str]:
@@ -231,6 +294,13 @@ def _is_environment_file(name: str) -> bool:
 def _is_environment_source(source: str) -> bool:
     normalized = source.removeprefix('./').rstrip('/')
     return _is_environment_file(PurePosixPath(normalized).name)
+
+
+def _contains_directory(
+    path: PurePosixPath,
+    directory_names: frozenset[str],
+) -> bool:
+    return bool(directory_names.intersection(path.parts))
 
 
 def parse_arguments() -> argparse.Namespace:

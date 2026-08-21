@@ -37,6 +37,54 @@ class RepositoryHygieneCommandTests(unittest.TestCase):
             violations,
         )
 
+    def test_reports_tracked_runtime_and_workspace_artifacts(self) -> None:
+        with temporary_repository() as repository:
+            write_file(repository, '.venv/bin/python', '')
+            write_file(repository, 'env.bak/bin/python', '')
+            write_file(repository, 'local.db', '')
+            write_file(repository, '.pytest_cache/state', '')
+            write_file(repository, '.ruff_cache/state', '')
+            write_file(repository, '.ozon-profile/cookies', '')
+            write_file(repository, 'profile_default/history', '')
+            write_file(repository, 'graphify-out/graph.json', '{}\n')
+            track_all(repository)
+
+            result, report = run_guard(repository)
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        violations = {
+            (item['kind'], item['path']) for item in report['violations']
+        }
+        self.assertIn(
+            ('tracked_virtual_environment', '.venv/bin/python'),
+            violations,
+        )
+        self.assertIn(
+            ('tracked_virtual_environment', 'env.bak/bin/python'),
+            violations,
+        )
+        self.assertIn(('tracked_database_artifact', 'local.db'), violations)
+        self.assertIn(
+            ('tracked_tool_cache', '.pytest_cache/state'),
+            violations,
+        )
+        self.assertIn(
+            ('tracked_tool_cache', '.ruff_cache/state'),
+            violations,
+        )
+        self.assertIn(
+            ('tracked_runtime_profile', '.ozon-profile/cookies'),
+            violations,
+        )
+        self.assertIn(
+            ('tracked_runtime_profile', 'profile_default/history'),
+            violations,
+        )
+        self.assertIn(
+            ('tracked_graph_artifact', 'graphify-out/graph.json'),
+            violations,
+        )
+
     def test_reports_environment_files_exposed_to_docker_build(self) -> None:
         with temporary_repository() as repository:
             write_file(repository, 'Dockerfile.api', 'COPY .env /app\n')
@@ -65,6 +113,25 @@ class RepositoryHygieneCommandTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(report['violations'], [])
+
+    def test_requires_wildcard_docker_exclusion_for_environment_variants(
+        self,
+    ) -> None:
+        with temporary_repository() as repository:
+            write_file(repository, 'Dockerfile.api', 'COPY src /app/src\n')
+            write_file(
+                repository,
+                '.dockerignore',
+                '.env\n.env.local\n!.env.example\n',
+            )
+            track_all(repository)
+
+            result, report = run_guard(repository)
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        violations = report['violations']
+        self.assertEqual(violations[0]['kind'], 'docker_environment_context')
+        self.assertIn('.env.*', violations[0]['message'])
 
 
 class TemporaryRepository:
