@@ -69,6 +69,58 @@ class MarketplaceValidationTests(unittest.TestCase):
                     validate_ozon_payload(payload),
                 )
 
+    def test_ozon_empty_mixed_with_unknown_product_node_is_drift(self) -> None:
+        payload = {
+            'layout': [{'component': 'syntheticEmpty'}],
+            'widgetStates': {
+                'synthetic-empty': json.dumps({'items': []}),
+                'synthetic-unknown': json.dumps({
+                    'newGrid': {
+                        'entry': {
+                            'skuId': '950001',
+                        },
+                    },
+                }),
+            },
+        }
+        self.assertEqual(
+            ValidationState.DRIFT,
+            validate_ozon_payload(payload),
+        )
+
+    def test_ozon_empty_allows_harmless_metadata_dict(self) -> None:
+        payload = {
+            'layout': [{'component': 'syntheticEmpty'}],
+            'widgetStates': {
+                'synthetic-empty': json.dumps({'items': []}),
+                'synthetic-metadata': json.dumps({
+                    'metadata': {
+                        'id': 'synthetic-layout-metadata',
+                        'revision': 2,
+                        'label': 'synthetic',
+                    },
+                }),
+            },
+        }
+        self.assertEqual(
+            ValidationState.VALID_EMPTY,
+            validate_ozon_payload(payload),
+        )
+
+    def test_ozon_mapper_contract_failure_is_drift(self) -> None:
+        payload = {
+            'layout': [{'component': 'syntheticGrid'}],
+            'widgetStates': {
+                'synthetic-malformed': json.dumps({
+                    'items': [{'action': []}],
+                }),
+            },
+        }
+        self.assertEqual(
+            ValidationState.DRIFT,
+            validate_ozon_payload(payload),
+        )
+
     def test_wildberries_html_states_are_distinct(self) -> None:
         cases = (
             ('success.html', ValidationState.VALID_WITH_ITEMS),

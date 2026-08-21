@@ -58,6 +58,22 @@ _YANDEX_EMPTY_PATTERNS = (
 _OZON_PRODUCT_COLLECTION_KEYS = frozenset(
     ('items', 'products', 'tiles', 'skuList', 'searchResults')
 )
+_OZON_PRODUCT_IDENTITY_KEYS = frozenset(
+    ('productId', 'sku', 'skuId')
+)
+_OZON_PRODUCT_COMMERCIAL_KEYS = frozenset(
+    (
+        'finalPrice',
+        'originalPrice',
+        'price',
+        'priceWithoutDiscount',
+        'salePrice',
+        'webPrice',
+    )
+)
+_OZON_PRODUCT_PRESENTATION_KEYS = frozenset(
+    ('action', 'image', 'images', 'link', 'name', 'productTitle', 'title')
+)
 _INVALID_JSON = object()
 
 
@@ -76,7 +92,11 @@ def validate_ozon_payload(payload: dict[str, Any]) -> ValidationState:
         (dict, list),
     ):
         return ValidationState.DRIFT
-    if extract_product_summary_map(payload, limit=1):
+    try:
+        summaries = extract_product_summary_map(payload, limit=1)
+    except Exception:
+        return ValidationState.DRIFT
+    if summaries:
         return ValidationState.VALID_WITH_ITEMS
 
     if not widget_states:
@@ -138,6 +158,8 @@ def _decode_json_value(raw_value: Any) -> Any:
 
 
 def _inspect_product_collections(value: dict[str, Any]) -> tuple[bool, bool]:
+    if _is_product_like_mapping(value):
+        return False, True
     has_empty = False
     for key, child in value.items():
         if key in _OZON_PRODUCT_COLLECTION_KEYS:
@@ -155,3 +177,25 @@ def _inspect_product_collections(value: dict[str, Any]) -> tuple[bool, bool]:
                 return has_empty, True
             has_empty = has_empty or nested_empty
     return has_empty, False
+
+
+def _is_product_like_mapping(value: dict[str, Any]) -> bool:
+    keys = value.keys()
+    if _OZON_PRODUCT_IDENTITY_KEYS.intersection(keys):
+        return True
+    raw_id = value.get('id')
+    if (
+        (
+            isinstance(raw_id, int)
+            and not isinstance(raw_id, bool)
+        )
+        or (
+            isinstance(raw_id, str)
+            and raw_id.isdigit()
+        )
+    ):
+        return True
+    return bool(
+        _OZON_PRODUCT_COMMERCIAL_KEYS.intersection(keys)
+        and _OZON_PRODUCT_PRESENTATION_KEYS.intersection(keys)
+    )
