@@ -1,19 +1,64 @@
-import os
+from pathlib import Path
+from typing import Literal
 
-from dotenv import load_dotenv
-from pydantic_settings import BaseSettings
+from pydantic import (
+    AliasChoices,
+    Field,
+    SecretStr,
+    ValidationInfo,
+    field_validator,
+)
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from src.marketplaces.contracts import MarketplaceName, SourceName
 
 DEFAULT_APP_TITLE = 'Price Watcher'
 DEFAULT_APP_DESCRIPTION = 'Сервис для просмотра цен.'
 
 
-load_dotenv()
-
 UPLOAD_DIR = 'media'
 STATIC_DIR = '/media'
 
+RuntimeRole = Literal['local', 'api', 'bot']
+CaptchaAdapter = Literal['disabled', 'ohmycaptcha']
+SmartCaptchaMode = Literal['disabled', 'frictionless']
+
+_RUNTIME_ROLES = frozenset(('local', 'api', 'bot'))
+_MARKETPLACES = frozenset(('wildberries', 'ozon', 'yandex_market'))
+_DEFAULT_SOURCE_CHAINS: dict[MarketplaceName, tuple[SourceName, ...]] = {
+    'wildberries': (SourceName.BROWSER, SourceName.APIFY),
+    'ozon': (SourceName.BROWSER, SourceName.APIFY),
+    'yandex_market': (
+        SourceName.PUBLIC,
+        SourceName.BROWSER,
+        SourceName.APIFY,
+    ),
+}
+
+
+def parse_source_chain(
+    value: str,
+    default: tuple[SourceName, ...],
+) -> tuple[SourceName, ...]:
+    """Parse a comma-separated source chain without changing its topology."""
+    raw = value.strip()
+    if not raw:
+        return default
+    sources = tuple(SourceName(part.strip()) for part in raw.split(','))
+    if len(sources) != len(set(sources)):
+        raise ValueError('source chain cannot contain duplicates')
+    return sources
+
 
 class Settings(BaseSettings):
+    """Settings read only from the explicit process environment."""
+
+    model_config = SettingsConfigDict(
+        env_file=None,
+        extra='forbid',
+        validate_default=True,
+    )
+
     db_dialect: str
     db_driver: str
     secret: str
@@ -60,6 +105,98 @@ class Settings(BaseSettings):
     wb_block_cooldown_sec: float = 120.0
     proxy_list: str = ''
     categories_config_path: str = 'config/monitored_categories.yaml'
+    marketplace_runtime_role: RuntimeRole = 'local'
+    browser_profile_root: str = 'browser-profiles'
+    wildberries_source_chain: str = 'browser,apify'
+    ozon_source_chain: str = 'browser,apify'
+    yandex_market_source_chain: str = 'public,browser,apify'
+    apify_token: SecretStr = Field(
+        default_factory=lambda: SecretStr(''),
+        validation_alias=AliasChoices(
+            'apify_token',
+            'apify_api_token',
+            'APIFY_TOKEN',
+            'APIFY_API_TOKEN',
+        ),
+    )
+    apify_wildberries_actor_id: str = ''
+    apify_ozon_actor_id: str = ''
+    apify_yandex_market_actor_id: str = ''
+    captcha_adapter: CaptchaAdapter = 'disabled'
+    ohmycaptcha_api_key: SecretStr = SecretStr('')
+    smartcaptcha_mode: SmartCaptchaMode = 'disabled'
+    smartcaptcha_client_key: SecretStr = SecretStr('')
+    marketplace_operation_timeout_ms: int = Field(default=30000, gt=0)
+    marketplace_max_content_bytes: int = Field(default=2_000_000, gt=0)
+    marketplace_retry_max_attempts: int = Field(default=2, ge=1, le=2)
+    marketplace_retry_base_delay_ms: int = Field(default=250, ge=0)
+    marketplace_retry_max_delay_ms: int = Field(default=1000, ge=0)
+
+    @field_validator(
+        'wildberries_source_chain',
+        'ozon_source_chain',
+        'yandex_market_source_chain',
+    )
+    @classmethod
+    def validate_source_chain(cls, value: str) -> str:
+        """Fail fast for source names and duplicate source entries."""
+        parse_source_chain(value, ())
+        return value
+
+    @field_validator('marketplace_retry_max_delay_ms')
+    @classmethod
+    def validate_retry_delay_bounds(
+        cls,
+        value: int,
+        info: ValidationInfo,
+    ) -> int:
+        """Keep retry delays bounded in a configuration independent way."""
+        data = info.data
+        base_delay = data.get('marketplace_retry_base_delay_ms', 0)
+        if value < base_delay:
+            raise ValueError(
+                'marketplace retry max delay must not be less than base delay'
+            )
+        return value
+
+    @property
+    def runtime_role(self) -> RuntimeRole:
+        """Expose the concise role name used by marketplace components."""
+        return self.marketplace_runtime_role
+
+    @property
+    def apify_api_token(self) -> SecretStr:
+        """Preserve the descriptive token accessor for source adapters."""
+        return self.apify_token
+
+    def source_chain(
+        self,
+        marketplace: MarketplaceName,
+    ) -> tuple[SourceName, ...]:
+        """Return the configured source order for one supported marketplace."""
+        if marketplace not in _MARKETPLACES:
+            raise ValueError(f'unsupported marketplace: {marketplace}')
+        source_value = getattr(self, f'{marketplace}_source_chain')
+        default = _DEFAULT_SOURCE_CHAINS[marketplace]
+        return parse_source_chain(source_value, default)
+
+    def profile_dir(
+        self,
+        role: RuntimeRole,
+        marketplace: MarketplaceName,
+    ) -> Path:
+        """Return a resolved browser profile path contained in its root."""
+        if role not in _RUNTIME_ROLES:
+            raise ValueError(f'unsupported marketplace runtime role: {role}')
+        if marketplace not in _MARKETPLACES:
+            raise ValueError(f'unsupported marketplace: {marketplace}')
+        root = Path(self.browser_profile_root).expanduser().resolve()
+        profile = (root / role / marketplace).resolve()
+        try:
+            profile.relative_to(root)
+        except ValueError as exc:
+            raise ValueError('browser profile path escapes its root') from exc
+        return profile
 
     @property
     def effective_min_parser_discount(self) -> int:
