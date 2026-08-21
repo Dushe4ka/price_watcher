@@ -5,6 +5,7 @@ import unittest
 
 from src.marketplaces.contracts import (
     CategoryRequest,
+    MarketplaceResult,
     MarketplaceOperation,
     ProductRequest,
     SearchRequest,
@@ -38,6 +39,16 @@ class RequestContractTests(unittest.TestCase):
             ProductRequest(product_id='synthetic-1').product_id,
             'synthetic-1',
         )
+
+    def test_product_request_repr_redacts_product_id(self) -> None:
+        request = ProductRequest(product_id='product-id-sentinel')
+
+        self.assertNotIn('product-id-sentinel', repr(request))
+
+    def test_search_request_repr_redacts_query(self) -> None:
+        request = SearchRequest(query='search-query-sentinel', limit=3)
+
+        self.assertNotIn('search-query-sentinel', repr(request))
 
 
 class SourceResultTests(unittest.TestCase):
@@ -98,6 +109,42 @@ class SourceResultTests(unittest.TestCase):
         self.assertIsNone(empty.value)
         self.assertEqual(SafeErrorCode.TRANSPORT_FAILED,
                          failure.attempt.error_code)
+
+    def test_source_result_repr_redacts_value(self) -> None:
+        result = SourceResult(
+            source=SourceName.BROWSER,
+            outcome=SourceOutcome.SUCCESS,
+            value=('https://product-url-sentinel', 'product-title-sentinel'),
+            attempt=SourceAttempt(
+                source=SourceName.BROWSER,
+                outcome=SourceOutcome.SUCCESS,
+                duration_ms=4,
+                item_count=1,
+            ),
+        )
+
+        self.assertNotIn('https://product-url-sentinel', repr(result))
+        self.assertNotIn('product-title-sentinel', repr(result))
+
+    def test_marketplace_result_repr_redacts_value(self) -> None:
+        result = MarketplaceResult(
+            marketplace='ozon',
+            operation=MarketplaceOperation.PARSE_PRODUCT,
+            outcome=SourceOutcome.SUCCESS,
+            value=('product-id-sentinel', 'image-url-sentinel'),
+            attempts=(
+                SourceAttempt(
+                    source=SourceName.BROWSER,
+                    outcome=SourceOutcome.SUCCESS,
+                    duration_ms=4,
+                    item_count=1,
+                ),
+            ),
+            selected_source=SourceName.BROWSER,
+        )
+
+        self.assertNotIn('product-id-sentinel', repr(result))
+        self.assertNotIn('image-url-sentinel', repr(result))
 
 
 if __name__ == '__main__':

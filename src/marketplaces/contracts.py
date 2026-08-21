@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Generic, Literal, TypeVar
 
@@ -45,12 +45,12 @@ class CategoryRequest:
 
 @dataclass(frozen=True, slots=True)
 class ProductRequest:
-    product_id: str
+    product_id: str = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
 class SearchRequest:
-    query: str
+    query: str = field(repr=False)
     limit: int
     page: int = 1
 
@@ -77,7 +77,7 @@ class SourceAttempt:
 class SourceResult(Generic[T]):
     source: SourceName
     outcome: SourceOutcome
-    value: T | None
+    value: T | None = field(repr=False)
     attempt: SourceAttempt
 
     def __post_init__(self) -> None:
@@ -99,7 +99,7 @@ class MarketplaceResult(Generic[T]):
     marketplace: MarketplaceName
     operation: MarketplaceOperation
     outcome: SourceOutcome
-    value: T | None
+    value: T | None = field(repr=False)
     attempts: tuple[SourceAttempt, ...]
     selected_source: SourceName | None
 
