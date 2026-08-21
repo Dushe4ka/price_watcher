@@ -71,6 +71,13 @@ class SourceAttempt:
             raise ValueError('item_count must not be negative')
         if self.transport_attempts < 0:
             raise ValueError('transport_attempts must not be negative')
+        if self.transport_attempts == 0 and (
+            self.outcome is not SourceOutcome.TRANSPORT_ERROR
+            or self.error_code is not SafeErrorCode.TIMEOUT
+        ):
+            raise ValueError(
+                'zero transport_attempts requires a timeout transport error'
+            )
 
 
 @dataclass(frozen=True, slots=True)

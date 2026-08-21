@@ -52,18 +52,42 @@ class RequestContractTests(unittest.TestCase):
 
 
 class SourceResultTests(unittest.TestCase):
-    def test_transport_attempts_accepts_zero_and_rejects_negative(
+    def test_zero_transport_attempts_accepts_only_timeout(
         self,
     ) -> None:
-        attempt = SourceAttempt(
+        timeout_attempt = SourceAttempt(
             source=SourceName.PUBLIC,
             outcome=SourceOutcome.TRANSPORT_ERROR,
             duration_ms=0,
             item_count=0,
+            error_code=SafeErrorCode.TIMEOUT,
             transport_attempts=0,
         )
 
-        self.assertEqual(0, attempt.transport_attempts)
+        self.assertEqual(0, timeout_attempt.transport_attempts)
+
+    def test_zero_transport_attempts_rejects_non_timeout_outcomes(
+        self,
+    ) -> None:
+        invalid_attempts = (
+            (SourceOutcome.SUCCESS, None),
+            (SourceOutcome.EMPTY, None),
+            (SourceOutcome.TRANSPORT_ERROR, SafeErrorCode.TRANSPORT_FAILED),
+        )
+
+        for outcome, error_code in invalid_attempts:
+            with self.subTest(outcome=outcome, error_code=error_code):
+                with self.assertRaisesRegex(ValueError, 'zero'):
+                    SourceAttempt(
+                        source=SourceName.PUBLIC,
+                        outcome=outcome,
+                        duration_ms=0,
+                        item_count=0,
+                        error_code=error_code,
+                        transport_attempts=0,
+                    )
+
+    def test_transport_attempts_rejects_negative(self) -> None:
         with self.assertRaisesRegex(ValueError, 'not be negative'):
             SourceAttempt(
                 source=SourceName.PUBLIC,

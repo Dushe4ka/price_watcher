@@ -106,7 +106,7 @@ def _deadline_expired_result(source: SourceName) -> SourceResult[None]:
             outcome=SourceOutcome.TRANSPORT_ERROR,
             duration_ms=0,
             item_count=0,
-            error_code=SafeErrorCode.TRANSPORT_FAILED,
+            error_code=SafeErrorCode.TIMEOUT,
             transport_attempts=0,
         ),
     )

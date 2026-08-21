@@ -19,6 +19,7 @@ class SafeErrorCode(StrEnum):
     INVALID_CONFIG = 'invalid_config'
     PARSE_DRIFT = 'parse_drift'
     RATE_LIMITED = 'rate_limited'
+    TIMEOUT = 'timeout'
     TRANSPORT_FAILED = 'transport_failed'
 
 
