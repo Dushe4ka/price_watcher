@@ -95,7 +95,7 @@ class MarketplaceValidationTests(unittest.TestCase):
                 'synthetic-empty': json.dumps({'items': []}),
                 'synthetic-metadata': json.dumps({
                     'metadata': {
-                        'id': 'synthetic-layout-metadata',
+                        'id': 42,
                         'revision': 2,
                         'label': 'synthetic',
                     },
@@ -104,6 +104,28 @@ class MarketplaceValidationTests(unittest.TestCase):
         }
         self.assertEqual(
             ValidationState.VALID_EMPTY,
+            validate_ozon_payload(payload),
+        )
+
+    def test_ozon_numeric_id_with_product_evidence_is_drift(self) -> None:
+        payload = {
+            'layout': [{'component': 'syntheticEmpty'}],
+            'widgetStates': {
+                'synthetic-empty': json.dumps({'items': []}),
+                'synthetic-unknown': json.dumps({
+                    'newGrid': {
+                        'entry': {
+                            'id': 950002,
+                            'price': '2100',
+                            'title': 'Synthetic unknown product',
+                            'link': '/synthetic-product',
+                        },
+                    },
+                }),
+            },
+        }
+        self.assertEqual(
+            ValidationState.DRIFT,
             validate_ozon_payload(payload),
         )
 

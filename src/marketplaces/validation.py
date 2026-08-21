@@ -183,8 +183,12 @@ def _is_product_like_mapping(value: dict[str, Any]) -> bool:
     keys = value.keys()
     if _OZON_PRODUCT_IDENTITY_KEYS.intersection(keys):
         return True
+    has_commercial = bool(_OZON_PRODUCT_COMMERCIAL_KEYS.intersection(keys))
+    has_presentation = bool(
+        _OZON_PRODUCT_PRESENTATION_KEYS.intersection(keys)
+    )
     raw_id = value.get('id')
-    if (
+    has_numeric_id = (
         (
             isinstance(raw_id, int)
             and not isinstance(raw_id, bool)
@@ -193,9 +197,7 @@ def _is_product_like_mapping(value: dict[str, Any]) -> bool:
             isinstance(raw_id, str)
             and raw_id.isdigit()
         )
-    ):
-        return True
-    return bool(
-        _OZON_PRODUCT_COMMERCIAL_KEYS.intersection(keys)
-        and _OZON_PRODUCT_PRESENTATION_KEYS.intersection(keys)
     )
+    if has_numeric_id and (has_commercial or has_presentation):
+        return True
+    return has_commercial and has_presentation
