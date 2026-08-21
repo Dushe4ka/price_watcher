@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -22,7 +22,7 @@ from src.marketplaces.sources.public import (
 from src.crawlers.yandex_market import YandexMarketCategoryCrawler
 from src.ozon.client import OzonClient
 from src.ozon.constants import OZON_PAGE_JSON_URLS
-from src.parsers.utils import BlockedError
+from src.parsers.utils import BlockedError, retry_request
 from src.parsers.yandex_market import YandexMarketParser
 from src.wb.client import WBClient
 
@@ -175,6 +175,28 @@ class MarketplaceSourceErrorTests(unittest.TestCase):
         self.assertNotIn(marker, str(raised.exception))
 
 
+class RetryLogRedactionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_decorated_failure_never_logs_exception_marker(self) -> None:
+        marker = 'https://example.test/synthetic-sensitive-product-940404'
+        calls = 0
+
+        @retry_request
+        async def fail_with_url() -> None:
+            nonlocal calls
+            calls += 1
+            raise RuntimeError(marker)
+
+        with (
+            patch('src.parsers.utils.asyncio.sleep', new=AsyncMock()),
+            self.assertLogs('src.parsers.utils', level='WARNING') as captured,
+            self.assertRaises(RuntimeError),
+        ):
+            await fail_with_url()
+
+        self.assertEqual(4, calls)
+        self.assertNotIn(marker, '\n'.join(captured.output))
+
+
 class _OzonResponse:
     status = 403
 
@@ -261,6 +283,46 @@ class _WBEvaluationSession:
         pass
 
 
+class _WBEmptyEvaluationPage:
+    def __init__(self, html: str) -> None:
+        self.html = html
+        self.evaluate_calls = 0
+        self.content_calls = 0
+
+    async def evaluate(self, extract_js: str) -> list[object]:
+        self.evaluate_calls += 1
+        return []
+
+    async def content(self) -> str:
+        self.content_calls += 1
+        return self.html
+
+
+class _WBEmptyEvaluationSession:
+    def __init__(self, html: str) -> None:
+        self.page = _WBEmptyEvaluationPage(html)
+        self.navigation_calls = 0
+
+    async def ensure_page(self) -> _WBEmptyEvaluationPage:
+        return self.page
+
+    async def goto_and_wait(
+        self,
+        page: _WBEmptyEvaluationPage,
+        url: str,
+    ) -> None:
+        self.navigation_calls += 1
+
+    def note_block(self) -> None:
+        pass
+
+    def note_success(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
 class NativeClientFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_ozon_challenge_is_typed_without_retry(self) -> None:
         session = _OzonSession()
@@ -303,6 +365,56 @@ class NativeClientFailureTests(unittest.IsolatedAsyncioTestCase):
             await client.category_products('https://example.test', 2)
 
         self.assertEqual(SourceOutcome.PARSE_DRIFT, raised.exception.outcome)
+
+    async def test_wb_empty_js_challenge_is_typed_on_same_page(self) -> None:
+        session = _WBEmptyEvaluationSession(
+            _fixture('wildberries/challenge.html'),
+        )
+        client = WBClient(session=session)
+
+        with (
+            patch('src.wb.client.settings.wb_request_delay_sec', 0),
+            self.assertRaises(MarketplaceSourceError) as raised,
+        ):
+            await client.category_products('https://example.test', 2)
+
+        self.assertEqual(SourceOutcome.CHALLENGE, raised.exception.outcome)
+        self.assertEqual(1, session.navigation_calls)
+        self.assertEqual(1, session.page.evaluate_calls)
+        self.assertEqual(1, session.page.content_calls)
+
+    async def test_wb_empty_js_drift_is_typed_on_same_page(self) -> None:
+        session = _WBEmptyEvaluationSession(
+            _fixture('wildberries/drift.html'),
+        )
+        client = WBClient(session=session)
+
+        with (
+            patch('src.wb.client.settings.wb_request_delay_sec', 0),
+            self.assertRaises(MarketplaceSourceError) as raised,
+        ):
+            await client.category_products('https://example.test', 2)
+
+        self.assertEqual(SourceOutcome.PARSE_DRIFT, raised.exception.outcome)
+        self.assertEqual(1, session.navigation_calls)
+        self.assertEqual(1, session.page.evaluate_calls)
+        self.assertEqual(1, session.page.content_calls)
+
+    async def test_wb_empty_js_requires_structural_empty_marker(self) -> None:
+        session = _WBEmptyEvaluationSession(
+            _fixture('wildberries/empty.html'),
+        )
+        client = WBClient(session=session)
+
+        with patch('src.wb.client.settings.wb_request_delay_sec', 0):
+            product_ids, pre_parsed = await client.category_products(
+                'https://example.test',
+                2,
+            )
+
+        self.assertEqual([], product_ids)
+        self.assertEqual({}, pre_parsed)
+        self.assertEqual(1, session.page.content_calls)
 
 
 class _FakeResponse:

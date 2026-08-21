@@ -123,17 +123,18 @@ def retry_request(
                 last_exc = exc
                 if attempt <= len(_RETRY_DELAYS):
                     logger.warning(
-                        'Retry %s attempt %s failed: %s',
+                        'Parser request failed: '
+                        'function=%s status=retrying attempt=%s',
                         fn.__qualname__,
                         attempt,
-                        exc,
                     )
                     await asyncio.sleep(delay)
                 else:
                     logger.error(
-                        'All retries failed for %s: %s',
+                        'Parser request failed: '
+                        'function=%s status=exhausted attempt=%s',
                         fn.__qualname__,
-                        exc,
+                        attempt,
                     )
                     raise last_exc  # type: ignore[misc]
         raise RuntimeError('unreachable')

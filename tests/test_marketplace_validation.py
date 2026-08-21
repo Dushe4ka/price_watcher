@@ -32,6 +32,43 @@ class MarketplaceValidationTests(unittest.TestCase):
                 payload = json.loads(_load_text(f'ozon/{fixture}'))
                 self.assertEqual(expected, validate_ozon_payload(payload))
 
+    def test_ozon_canonical_summary_without_link_is_valid_item(self) -> None:
+        payload = {
+            'layout': [{'component': 'syntheticGrid'}],
+            'widgetStates': {
+                'synthetic-grid': json.dumps({
+                    'items': [{
+                        'skuId': '940001',
+                        'title': 'Synthetic linkless item',
+                        'webPrice': {'price': '1250'},
+                    }],
+                }),
+            },
+        }
+        self.assertEqual(
+            ValidationState.VALID_WITH_ITEMS,
+            validate_ozon_payload(payload),
+        )
+
+    def test_ozon_empty_mixed_with_invalid_widget_is_drift(self) -> None:
+        invalid_widgets = (
+            '{not-json',
+            json.dumps({'syntheticUnknownCollection': [{'value': 1}]}),
+        )
+        for invalid_widget in invalid_widgets:
+            with self.subTest(invalid_widget=invalid_widget):
+                payload = {
+                    'layout': [{'component': 'syntheticEmpty'}],
+                    'widgetStates': {
+                        'synthetic-empty': json.dumps({'items': []}),
+                        'synthetic-invalid': invalid_widget,
+                    },
+                }
+                self.assertEqual(
+                    ValidationState.DRIFT,
+                    validate_ozon_payload(payload),
+                )
+
     def test_wildberries_html_states_are_distinct(self) -> None:
         cases = (
             ('success.html', ValidationState.VALID_WITH_ITEMS),
@@ -44,6 +81,13 @@ class MarketplaceValidationTests(unittest.TestCase):
                 html = _load_text(f'wildberries/{fixture}')
                 self.assertEqual(expected, validate_wb_dom_snapshot(html))
 
+    def test_wildberries_bare_empty_phrase_is_drift(self) -> None:
+        html = '<html><body><p>товары не найдены</p></body></html>'
+        self.assertEqual(
+            ValidationState.DRIFT,
+            validate_wb_dom_snapshot(html),
+        )
+
     def test_yandex_html_states_are_distinct(self) -> None:
         cases = (
             ('success.html', ValidationState.VALID_WITH_ITEMS),
@@ -55,6 +99,13 @@ class MarketplaceValidationTests(unittest.TestCase):
             with self.subTest(fixture=fixture):
                 html = _load_text(f'yandex_market/{fixture}')
                 self.assertEqual(expected, validate_yandex_html(html))
+
+    def test_yandex_bare_empty_phrase_is_drift(self) -> None:
+        html = '<html><body><p>products not found</p></body></html>'
+        self.assertEqual(
+            ValidationState.DRIFT,
+            validate_yandex_html(html),
+        )
 
 
 if __name__ == '__main__':

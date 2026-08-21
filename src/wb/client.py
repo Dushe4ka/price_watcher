@@ -6,6 +6,10 @@ import logging
 from src.core.config import settings
 from src.marketplaces.contracts import SourceOutcome
 from src.marketplaces.errors import MarketplaceSourceError, SafeErrorCode
+from src.marketplaces.validation import (
+    ValidationState,
+    validate_wb_dom_snapshot,
+)
 from src.parsers.base import ParsedProduct
 from src.parsers.utils import BlockedError
 from src.wb.constants import (
@@ -101,7 +105,21 @@ class WBClient:
         page = await self._session.ensure_page()
         await self._session.goto_and_wait(page, url)
         await asyncio.sleep(settings.wb_request_delay_sec)
-        return await page.evaluate(extract_js)
+        result = await page.evaluate(extract_js)
+        if result == []:
+            html = await page.content()
+            state = validate_wb_dom_snapshot(html)
+            if state is ValidationState.CHALLENGE:
+                raise MarketplaceSourceError(
+                    SourceOutcome.CHALLENGE,
+                    SafeErrorCode.CHALLENGE_DETECTED,
+                )
+            if state is not ValidationState.VALID_EMPTY:
+                raise MarketplaceSourceError(
+                    SourceOutcome.PARSE_DRIFT,
+                    SafeErrorCode.PARSE_DRIFT,
+                )
+        return result
 
     async def close(self) -> None:
         await self._session.close()
