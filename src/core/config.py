@@ -1,6 +1,8 @@
+import os
 from pathlib import Path
 from typing import Literal
 
+from dotenv import load_dotenv
 from pydantic import (
     AliasChoices,
     Field,
@@ -20,7 +22,7 @@ UPLOAD_DIR = 'media'
 STATIC_DIR = '/media'
 
 RuntimeRole = Literal['local', 'api', 'bot']
-CaptchaAdapter = Literal['disabled', 'ohmycaptcha']
+CaptchaAdapterMode = Literal['disabled', 'ohmycaptcha']
 SmartCaptchaMode = Literal['disabled', 'frictionless']
 
 _RUNTIME_ROLES = frozenset(('local', 'api', 'bot'))
@@ -34,6 +36,10 @@ _DEFAULT_SOURCE_CHAINS: dict[MarketplaceName, tuple[SourceName, ...]] = {
         SourceName.APIFY,
     ),
 }
+
+
+if os.environ.get('PYTHON_DOTENV_DISABLED') != '1':
+    load_dotenv()
 
 
 def parse_source_chain(
@@ -61,17 +67,17 @@ class Settings(BaseSettings):
 
     db_dialect: str
     db_driver: str
-    secret: str
+    secret: str = Field(repr=False)
     title: str = DEFAULT_APP_TITLE
     description: str = DEFAULT_APP_DESCRIPTION
     first_superuser_email: str
-    first_superuser_password: str
+    first_superuser_password: str = Field(repr=False)
     postgres_user: str
-    postgres_password: str
+    postgres_password: str = Field(repr=False)
     postgres_db: str
     postgres_port: str
     postgres_host: str
-    telegram_bot_token: str = ''
+    telegram_bot_token: str = Field(default='', repr=False)
     telegram_channel_id: str = ''
     min_discount_percent: int = 15
     min_parser_discount_percent: int | None = None
@@ -103,7 +109,7 @@ class Settings(BaseSettings):
     wb_fetch_retries: int = 3
     wb_max_consecutive_blocks: int = 3
     wb_block_cooldown_sec: float = 120.0
-    proxy_list: str = ''
+    proxy_list: str = Field(default='', repr=False)
     categories_config_path: str = 'config/monitored_categories.yaml'
     marketplace_runtime_role: RuntimeRole = 'local'
     browser_profile_root: str = 'browser-profiles'
@@ -122,12 +128,16 @@ class Settings(BaseSettings):
     apify_wildberries_actor_id: str = ''
     apify_ozon_actor_id: str = ''
     apify_yandex_market_actor_id: str = ''
-    captcha_adapter: CaptchaAdapter = 'disabled'
+    captcha_adapter_mode: CaptchaAdapterMode = 'disabled'
     ohmycaptcha_api_key: SecretStr = SecretStr('')
     smartcaptcha_mode: SmartCaptchaMode = 'disabled'
     smartcaptcha_client_key: SecretStr = SecretStr('')
-    marketplace_operation_timeout_ms: int = Field(default=30000, gt=0)
-    marketplace_max_content_bytes: int = Field(default=2_000_000, gt=0)
+    marketplace_total_timeout_sec: int = Field(default=30, gt=0, le=300)
+    marketplace_max_content_bytes: int = Field(
+        default=2_000_000,
+        gt=0,
+        le=10_485_760,
+    )
     marketplace_retry_max_attempts: int = Field(default=2, ge=1, le=2)
     marketplace_retry_base_delay_ms: int = Field(default=250, ge=0)
     marketplace_retry_max_delay_ms: int = Field(default=1000, ge=0)
