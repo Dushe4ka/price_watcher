@@ -130,6 +130,7 @@ celerybeat.pid
 .env.*
 !.env.example
 .venv
+.venv-ohmycaptcha/
 .bot_venv
 .backend_venv
 env/
