@@ -1,0 +1,15 @@
+{
+  "include": [
+    "main.py",
+    "src",
+    "tests"
+  ],
+  "extraPaths": [
+    ".",
+    "/home/shenhao/recaptcha"
+  ],
+  "stubPath": "typings",
+  "venvPath": ".",
+  "venv": ".venv",
+  "typeCheckingMode": "standard"
+}

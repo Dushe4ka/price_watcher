@@ -1,0 +1,134 @@
+site_name: OhMyCaptcha
+site_description: Self-hostable YesCaptcha-compatible captcha solver built with FastAPI, Playwright, and OpenAI-compatible multimodal models.
+site_url: https://shenhao-stu.github.io/ohmycaptcha/
+repo_url: https://github.com/shenhao-stu/ohmycaptcha
+repo_name: shenhao-stu/ohmycaptcha
+edit_uri: edit/main/docs/
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/shenhao-stu/ohmycaptcha
+
+extra_css:
+  - stylesheets/extra.css
+
+theme:
+  name: material
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: white
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - toc.follow
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+
+plugins:
+  - search
+  - i18n:
+      docs_structure: folder
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: en
+          name: English
+          default: true
+          build: true
+          nav_translations:
+            Home: Home
+            Getting Started: Getting Started
+            API Reference: API Reference
+            Usage: Usage
+            reCAPTCHA v3: reCAPTCHA v3
+            reCAPTCHA v2: reCAPTCHA v2
+            hCaptcha: hCaptcha
+            Cloudflare Turnstile: Cloudflare Turnstile
+            Image Classification: Image Classification
+            Image CAPTCHA: Image CAPTCHA
+            Positioning: Positioning
+            Deployment: Deployment
+            Local Model (SGLang): Local Model (SGLang)
+            Render: Render
+            Hugging Face Spaces: Hugging Face Spaces
+            Agent Skill: Agent Skill
+            Acceptance: Acceptance
+            FAQ: FAQ
+        - locale: zh
+          name: 简体中文
+          build: true
+          site_name: OhMyCaptcha
+          nav_translations:
+            Home: 首页
+            Getting Started: 快速开始
+            API Reference: API 参考
+            Usage: 使用指南
+            reCAPTCHA v3: reCAPTCHA v3
+            reCAPTCHA v2: reCAPTCHA v2
+            hCaptcha: hCaptcha
+            Cloudflare Turnstile: Cloudflare Turnstile
+            Image Classification: 图像分类
+            Image CAPTCHA: 图片验证码
+            Positioning: 项目定位
+            Deployment: 部署
+            Local Model (SGLang): 本地模型 (SGLang)
+            Render: Render
+            Hugging Face Spaces: Hugging Face Spaces
+            Agent Skill: Agent Skill
+            Acceptance: 验收
+            FAQ: 常见问题
+  - redirects
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - API Reference: api-reference.md
+  - Usage:
+      - reCAPTCHA v3: usage/recaptcha-v3.md
+      - reCAPTCHA v2: usage/recaptcha-v2.md
+      - hCaptcha: usage/hcaptcha.md
+      - Cloudflare Turnstile: usage/turnstile.md
+      - Image Classification: usage/classification.md
+      - Image CAPTCHA: usage/image-captcha.md
+  - Positioning: positioning.md
+  - Deployment:
+      - Local Model (SGLang): deployment/local-model.md
+      - Render: deployment/render.md
+      - Hugging Face Spaces: deployment/huggingface.md
+  - Agent Skill: skill.md
+  - Acceptance: acceptance.md
+  - FAQ: faq.md

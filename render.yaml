@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: captcha-solver
+    runtime: docker
+    dockerfilePath: ./Dockerfile.render
+    dockerContext: .
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: CLIENT_KEY
+        sync: false
+      - key: CAPTCHA_BASE_URL
+        value: "https://your-openai-compatible-endpoint/v1"
+      - key: CAPTCHA_API_KEY
+        sync: false
+      - key: CAPTCHA_MODEL
+        value: "gpt-5.4"
+      - key: CAPTCHA_MULTIMODAL_MODEL
+        value: "qwen3.5-2b"
+      - key: CAPTCHA_RETRIES
+        value: "3"
+      - key: CAPTCHA_TIMEOUT
+        value: "30"
+      - key: BROWSER_HEADLESS
+        value: "true"
+      - key: BROWSER_TIMEOUT
+        value: "30"
