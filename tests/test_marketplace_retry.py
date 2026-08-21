@@ -12,7 +12,11 @@ from src.marketplaces.contracts import (
 )
 from src.marketplaces.errors import SafeErrorCode
 from src.marketplaces.fallback import SourceCall
-from src.marketplaces.retry import RetryPolicy, SourceRetryExecutor
+from src.marketplaces.retry import (
+    OperationDeadline,
+    RetryPolicy,
+    SourceRetryExecutor,
+)
 
 
 class SourceRetryExecutorTests(unittest.IsolatedAsyncioTestCase):
@@ -39,6 +43,7 @@ class SourceRetryExecutorTests(unittest.IsolatedAsyncioTestCase):
             RetryPolicy(),
             sleep,
             lambda: 0.0,
+            _deadline(),
         )
 
         self.assertEqual(2, calls)
@@ -62,6 +67,7 @@ class SourceRetryExecutorTests(unittest.IsolatedAsyncioTestCase):
             RetryPolicy(),
             _no_sleep,
             lambda: 0.0,
+            _deadline(),
         )
 
         self.assertEqual(2, calls)
@@ -85,15 +91,71 @@ class SourceRetryExecutorTests(unittest.IsolatedAsyncioTestCase):
         async def sleep(delay: float) -> None:
             delays.append(delay)
 
+        clock = _FakeClock()
         result = await SourceRetryExecutor().run(
             SourceCall(SourceName.PUBLIC, transport_failure),
-            RetryPolicy(deadline_ms=100),
+            RetryPolicy(),
             sleep,
-            lambda: 0.0,
+            clock,
+            OperationDeadline.from_timeout_ms(100, clock),
         )
 
         self.assertEqual(1, calls)
         self.assertEqual([], delays)
+        self.assertEqual(1, result.attempt.transport_attempts)
+
+    async def test_second_source_uses_the_same_operation_deadline(
+        self,
+    ) -> None:
+        clock = _FakeClock()
+        deadline = OperationDeadline.from_timeout_ms(300, clock)
+        first_calls = 0
+        second_calls = 0
+        delays: list[float] = []
+
+        async def first_source() -> SourceResult[None]:
+            nonlocal first_calls
+            first_calls += 1
+            clock.advance(0.3)
+            return source_failure(
+                SourceName.PUBLIC,
+                SourceOutcome.TRANSPORT_ERROR,
+                SafeErrorCode.TRANSPORT_FAILED,
+            )
+
+        async def second_source() -> SourceResult[None]:
+            nonlocal second_calls
+            second_calls += 1
+            return source_failure(
+                SourceName.BROWSER,
+                SourceOutcome.TRANSPORT_ERROR,
+                SafeErrorCode.TRANSPORT_FAILED,
+            )
+
+        async def sleep(delay: float) -> None:
+            delays.append(delay)
+            clock.advance(delay)
+
+        executor = SourceRetryExecutor()
+        await executor.run(
+            SourceCall(SourceName.PUBLIC, first_source),
+            RetryPolicy(),
+            sleep,
+            clock,
+            deadline,
+        )
+        result = await executor.run(
+            SourceCall(SourceName.BROWSER, second_source),
+            RetryPolicy(),
+            sleep,
+            clock,
+            deadline,
+        )
+
+        self.assertEqual(1, first_calls)
+        self.assertEqual(0, second_calls)
+        self.assertEqual([], delays)
+        self.assertEqual(SourceOutcome.TRANSPORT_ERROR, result.outcome)
         self.assertEqual(1, result.attempt.transport_attempts)
 
     async def test_non_retriable_outcomes_are_called_once(self) -> None:
@@ -125,6 +187,7 @@ class SourceRetryExecutorTests(unittest.IsolatedAsyncioTestCase):
                     RetryPolicy(),
                     _no_sleep,
                     lambda: 0.0,
+                    _deadline(),
                 )
 
                 self.assertEqual(1, calls)
@@ -152,6 +215,7 @@ class SourceRetryExecutorTests(unittest.IsolatedAsyncioTestCase):
                     RetryPolicy(),
                     _no_sleep,
                     lambda: 0.0,
+                    _deadline(),
                 )
 
                 self.assertEqual(1, calls)
@@ -170,6 +234,21 @@ class SourceRetryExecutorTests(unittest.IsolatedAsyncioTestCase):
 
 async def _no_sleep(delay: float) -> None:
     del delay
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self._now = 0.0
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, elapsed: float) -> None:
+        self._now += elapsed
+
+
+def _deadline() -> OperationDeadline:
+    return OperationDeadline.from_timeout_ms(1_000, lambda: 0.0)
 
 
 if __name__ == '__main__':
