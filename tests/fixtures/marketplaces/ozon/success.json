@@ -1,0 +1,6 @@
+{
+  "layout": [{"component": "syntheticGrid"}],
+  "widgetStates": {
+    "synthetic-grid": "{\"items\":[{\"skuId\":\"910001\",\"title\":\"Synthetic Ozon Item\",\"link\":\"/product/synthetic-item-910001/\",\"webPrice\":{\"price\":\"1250\",\"originalPrice\":\"1500\"}}]}"
+  }
+}

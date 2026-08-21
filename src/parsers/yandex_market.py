@@ -3,14 +3,17 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
+import httpx
+
+from src.marketplaces.contracts import SourceOutcome
+from src.marketplaces.errors import MarketplaceSourceError, SafeErrorCode
+from src.marketplaces.validation import ValidationState, validate_yandex_html
 from src.parsers.base import BaseParser, ParsedProduct
 from src.parsers.utils import (
-    BlockedError,
     NotFoundError,
     ParsingError,
     create_http_client,
     get_random_ua,
-    retry_request,
 )
 from src.parsers.ym_api import (
     PRODUCT_URL_RE,
@@ -27,19 +30,23 @@ class YandexMarketParser(BaseParser):
     def extract_product_id(self, url: str) -> str:
         match = PRODUCT_URL_RE.search(url)
         if not match:
-            raise ValueError(
-                f'Cannot extract Yandex Market product ID from URL: {url}'
-            )
+            raise ValueError('cannot extract Yandex Market product ID')
         return match.group(1)
 
     def build_url(self, product_id: str) -> str:
         return build_product_url(product_id)
 
-    @retry_request
     async def parse_product(self, url_or_id: str) -> ParsedProduct:
-        is_url = url_or_id.startswith('http') or 'market.yandex.ru' in url_or_id
+        is_url = (
+            url_or_id.startswith('http')
+            or 'market.yandex.ru' in url_or_id
+        )
         if is_url:
-            page_url = url_or_id if url_or_id.startswith('http') else f'https://{url_or_id}'
+            page_url = (
+                url_or_id
+                if url_or_id.startswith('http')
+                else f'https://{url_or_id}'
+            )
             try:
                 url_hint = self.extract_product_id(url_or_id)
             except ValueError:
@@ -50,30 +57,56 @@ class YandexMarketParser(BaseParser):
 
         headers = {
             'User-Agent': get_random_ua(),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept': (
+                'text/html,application/xhtml+xml,application/xml;q=0.9,'
+                '*/*;q=0.8'
+            ),
             'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
         }
-        async with create_http_client(headers=headers) as client:
-            response = await client.get(page_url)
-            if response.status_code == 403:
-                raise BlockedError(
-                    f'Yandex Market blocked request for {url_hint}'
-                )
-            if response.status_code == 404:
-                raise NotFoundError(
-                    f'Yandex Market product {url_hint} not found'
-                )
-            response.raise_for_status()
-            html = response.text
+        try:
+            async with create_http_client(headers=headers) as client:
+                response = await client.get(page_url)
+                _raise_for_status(response.status_code)
+                html = response.text
+        except MarketplaceSourceError:
+            raise
+        except httpx.HTTPError as exc:
+            raise MarketplaceSourceError(
+                SourceOutcome.TRANSPORT_ERROR,
+                SafeErrorCode.TRANSPORT_FAILED,
+                cause=exc,
+            ) from exc
+
+        state = validate_yandex_html(html)
+        if state is ValidationState.CHALLENGE:
+            raise MarketplaceSourceError(
+                SourceOutcome.CHALLENGE,
+                SafeErrorCode.CHALLENGE_DETECTED,
+            )
+        if state is ValidationState.DRIFT:
+            raise MarketplaceSourceError(
+                SourceOutcome.PARSE_DRIFT,
+                SafeErrorCode.PARSE_DRIFT,
+            )
+        if state is ValidationState.VALID_EMPTY:
+            raise NotFoundError('Yandex Market product not found')
 
         for item in iter_ld_json_products(html):
             product_id = product_id_from_ld_json(item) or url_hint
             if product_id is None:
                 continue
-            return self._extract_from_json_ld(item, product_id, html)
+            try:
+                return self._extract_from_json_ld(item, product_id, html)
+            except ParsingError as exc:
+                raise MarketplaceSourceError(
+                    SourceOutcome.PARSE_DRIFT,
+                    SafeErrorCode.PARSE_DRIFT,
+                    cause=exc,
+                ) from exc
 
-        raise NotFoundError(
-            f'Yandex Market product {url_hint} not found (no Product data)'
+        raise MarketplaceSourceError(
+            SourceOutcome.PARSE_DRIFT,
+            SafeErrorCode.PARSE_DRIFT,
         )
 
     def _extract_from_json_ld(
@@ -162,3 +195,28 @@ def _price_from_offer(raw: Any) -> Decimal | None:
         return Decimal(cleaned)
     except Exception:
         return None
+
+
+def _raise_for_status(status_code: int) -> None:
+    if status_code == 403:
+        raise MarketplaceSourceError(
+            SourceOutcome.CHALLENGE,
+            SafeErrorCode.CHALLENGE_DETECTED,
+        )
+    if status_code == 404:
+        raise NotFoundError('Yandex Market product not found')
+    if status_code == 429:
+        raise MarketplaceSourceError(
+            SourceOutcome.RATE_LIMITED,
+            SafeErrorCode.RATE_LIMITED,
+        )
+    if status_code >= 500:
+        raise MarketplaceSourceError(
+            SourceOutcome.TRANSPORT_ERROR,
+            SafeErrorCode.TRANSPORT_FAILED,
+        )
+    if status_code != 200:
+        raise MarketplaceSourceError(
+            SourceOutcome.PARSE_DRIFT,
+            SafeErrorCode.PARSE_DRIFT,
+        )

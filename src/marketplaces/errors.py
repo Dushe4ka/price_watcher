@@ -7,6 +7,7 @@ if TYPE_CHECKING:
     from src.marketplaces.contracts import (
         MarketplaceName,
         MarketplaceOperation,
+        SourceOutcome,
         SourceAttempt,
     )
 
@@ -43,3 +44,26 @@ class MarketplaceOperationError(RuntimeError):
             f'marketplace operation failed: {marketplace} '
             f'{operation} ({error_code})'
         )
+
+
+class MarketplaceSourceError(RuntimeError):
+    """A typed source failure that never renders raw transport details."""
+
+    def __init__(
+        self,
+        outcome: SourceOutcome,
+        error_code: SafeErrorCode,
+        cause: Exception | None = None,
+    ) -> None:
+        from src.marketplaces.contracts import SourceOutcome
+
+        if outcome in (
+            SourceOutcome.SUCCESS,
+            SourceOutcome.EMPTY,
+            SourceOutcome.NOT_FOUND,
+        ):
+            raise ValueError('source error requires a failure outcome')
+        self.outcome = outcome
+        self.error_code = error_code
+        self.__cause__ = cause
+        super().__init__(f'marketplace source failed ({error_code})')

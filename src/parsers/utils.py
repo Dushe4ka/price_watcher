@@ -10,6 +10,7 @@ from typing import Any, Callable, Coroutine, TypeVar
 import httpx
 
 from src.core.config import settings
+from src.marketplaces.errors import MarketplaceSourceError
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,19 @@ class NotFoundError(ParserError):
 
 class ParsingError(ParserError):
     pass
+
+
+__all__ = (
+    'BlockedError',
+    'MarketplaceSourceError',
+    'NotFoundError',
+    'ParserError',
+    'ParsingError',
+    'create_http_client',
+    'get_proxy',
+    'get_random_ua',
+    'retry_request',
+)
 
 
 T = TypeVar('T')
