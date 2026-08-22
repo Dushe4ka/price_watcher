@@ -30,8 +30,38 @@ VIRTUAL_ENVIRONMENT_DIRECTORIES = frozenset(
     }
 )
 TOOL_CACHE_DIRECTORIES = frozenset({'.pytest_cache', '.ruff_cache'})
-RUNTIME_PROFILE_DIRECTORIES = frozenset({'.ozon-profile', 'profile_default'})
+RUNTIME_PROFILE_DIRECTORIES = frozenset(
+    {
+        '.browser-profile',
+        '.browser-profiles',
+        '.ozon-profile',
+        '.wb-profile',
+        '.yandex-market-profile',
+        'browser-profiles',
+        'profile_default',
+    }
+)
 GRAPH_ARTIFACT_DIRECTORIES = frozenset({'graphify-out'})
+BROWSER_PROFILE_MARKER_FILES = frozenset(
+    {
+        'Cookies',
+        'History',
+        'Login Data',
+        'Network Persistent State',
+        'Preferences',
+        'Secure Preferences',
+        'Web Data',
+    }
+)
+BROWSER_PROFILE_ROOT_FILES = frozenset(
+    {
+        '.profile.lock',
+        'Local State',
+        'SingletonCookie',
+        'SingletonLock',
+        'SingletonSocket',
+    }
+)
 ENVIRONMENT_VARIANT_PATTERNS = frozenset(
     {'.env.*', '.env*', '**/.env.*', '**/.env*'}
 )
@@ -122,6 +152,12 @@ def _tracked_artifact_violation(path: PurePosixPath) -> Violation | None:
             message='Tool caches must not be tracked.',
         )
     if _contains_directory(path, RUNTIME_PROFILE_DIRECTORIES):
+        return Violation(
+            kind='tracked_runtime_profile',
+            path=normalized_path,
+            message='Runtime browser profiles must not be tracked.',
+        )
+    if _is_browser_profile_artifact(path):
         return Violation(
             kind='tracked_runtime_profile',
             path=normalized_path,
@@ -303,6 +339,19 @@ def _contains_directory(
     return bool(directory_names.intersection(path.parts))
 
 
+def _is_browser_profile_artifact(path: PurePosixPath) -> bool:
+    if path.name in BROWSER_PROFILE_ROOT_FILES:
+        return True
+    profile_directories = {
+        part
+        for part in path.parts[:-1]
+        if part == 'Default' or part.startswith('Profile ')
+    }
+    return bool(profile_directories) and (
+        path.name in BROWSER_PROFILE_MARKER_FILES
+    )
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -321,6 +370,11 @@ def parse_arguments() -> argparse.Namespace:
         default='text',
         help='Output format (default: text).',
     )
+    parser.add_argument(
+        '--json',
+        action='store_true',
+        help='Shortcut for --format json.',
+    )
     return parser.parse_args()
 
 
@@ -328,7 +382,7 @@ def main() -> int:
     """Run the command-line hygiene check."""
     arguments = parse_arguments()
     violations = scan_repository(arguments.repository)
-    if arguments.format == 'json':
+    if arguments.json or arguments.format == 'json':
         report = {'violations': [asdict(item) for item in violations]}
         print(json.dumps(report))
     elif violations:

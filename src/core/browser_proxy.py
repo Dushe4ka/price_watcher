@@ -1,13 +1,26 @@
-"""Shared Playwright helpers used by every browser-backed marketplace client."""
+"""Shared helpers for every Playwright-backed marketplace client."""
 
 from __future__ import annotations
 
 STEALTH_INIT_SCRIPT = """
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 window.chrome = window.chrome || { runtime: {} };
-Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en-US', 'en'] });
+Object.defineProperty(
+    navigator,
+    'languages',
+    { get: () => ['ru-RU', 'ru', 'en-US', 'en'] },
+);
 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
 """
+
+_CHROMIUM_RUNTIME_ARGS = (
+    '--disable-blink-features=AutomationControlled',
+)
+
+
+def chromium_runtime_args() -> list[str]:
+    """Return reviewed Chromium arguments without sandbox bypasses."""
+    return list(_CHROMIUM_RUNTIME_ARGS)
 
 
 def playwright_proxy_config(proxy: str) -> dict[str, str]:

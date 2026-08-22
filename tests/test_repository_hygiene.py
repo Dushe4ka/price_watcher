@@ -46,6 +46,17 @@ class RepositoryHygieneCommandTests(unittest.TestCase):
             write_file(repository, '.ruff_cache/state', '')
             write_file(repository, '.ozon-profile/cookies', '')
             write_file(repository, 'profile_default/history', '')
+            write_file(
+                repository,
+                'browser-profiles/api/ozon/Default/Cookies',
+                '',
+            )
+            write_file(repository, '.wb-profile/Local State', '')
+            write_file(
+                repository,
+                'custom-root/bot/yandex_market/Default/History',
+                '',
+            )
             write_file(repository, 'graphify-out/graph.json', '{}\n')
             track_all(repository)
 
@@ -78,6 +89,24 @@ class RepositoryHygieneCommandTests(unittest.TestCase):
         )
         self.assertIn(
             ('tracked_runtime_profile', 'profile_default/history'),
+            violations,
+        )
+        self.assertIn(
+            (
+                'tracked_runtime_profile',
+                'browser-profiles/api/ozon/Default/Cookies',
+            ),
+            violations,
+        )
+        self.assertIn(
+            ('tracked_runtime_profile', '.wb-profile/Local State'),
+            violations,
+        )
+        self.assertIn(
+            (
+                'tracked_runtime_profile',
+                'custom-root/bot/yandex_market/Default/History',
+            ),
             violations,
         )
         self.assertIn(
@@ -132,6 +161,25 @@ class RepositoryHygieneCommandTests(unittest.TestCase):
         violations = report['violations']
         self.assertEqual(violations[0]['kind'], 'docker_environment_context')
         self.assertIn('.env.*', violations[0]['message'])
+
+    def test_json_shortcut_emits_machine_readable_report(self) -> None:
+        with temporary_repository() as repository:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    '-m',
+                    'scripts.repository_hygiene',
+                    '--repository',
+                    str(repository),
+                    '--json',
+                ],
+                cwd=Path(__file__).parents[1],
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual({'violations': []}, json.loads(result.stdout))
 
 
 class TemporaryRepository:

@@ -125,6 +125,25 @@ celerybeat.pid
 # Ozon persistent browser profile (patchright launch_persistent_context)
 .ozon-profile/
 
+# Marketplace persistent browser profiles and lock artifacts
+browser-profiles/
+.browser-profile/
+.browser-profiles/
+.wb-profile/
+.yandex-market-profile/
+**/.profile.lock
+**/SingletonLock
+**/SingletonCookie
+**/SingletonSocket
+**/Local State
+**/Default/Cookies
+**/Default/History
+**/Default/Login Data
+**/Default/Network Persistent State
+**/Default/Preferences
+**/Default/Secure Preferences
+**/Default/Web Data
+
 # Environments
 .env
 .env.*

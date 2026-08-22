@@ -4,10 +4,11 @@ import asyncio
 import itertools
 import logging
 import time
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from playwright.async_api import (
-    Browser,
     BrowserContext,
     Error as PlaywrightError,
     Page,
@@ -15,74 +16,98 @@ from playwright.async_api import (
     async_playwright,
 )
 
-from src.core.browser_proxy import STEALTH_INIT_SCRIPT, playwright_proxy_config
+from src.browser.allowlist import validate_main_frame_url
+from src.browser.profiles import ProfileLock, validate_single_browser_worker
+from src.core.browser_proxy import (
+    STEALTH_INIT_SCRIPT,
+    chromium_runtime_args,
+    playwright_proxy_config,
+)
 from src.core.config import settings
 from src.parsers.utils import BlockedError
 from src.wb.constants import WB_DESKTOP_UA
 
 logger = logging.getLogger(__name__)
 
-# WB's own antibot challenge (`/__wbaas/challenges/antibot/...`) reliably
-# stalls forever under *any* headless Chromium mode (plain, --headless=new,
-# with or without stealth patches) even from a clean residential IP — but
-# resolves in a couple of seconds under a real headed session. So this
-# session always launches headed; on a display-less server that means
-# Chromium must run under Xvfb (see Dockerfile.bot).
+# WB's own antibot challenge stalls under headless Chromium but normally
+# resolves under a real headed session. Display-less deployments provide Xvfb.
 _PLACEHOLDER_TITLES = ('', '...')
 
 
 class WBBrowserSession:
-    """Headed Playwright Chromium session with antibot wait + proxy rotation."""
+    """Headed Playwright persistent Chromium session for Wildberries."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        profile_dir: Path | None = None,
+        playwright_factory: Callable[[], Any] | None = None,
+        idle_sec: int | None = None,
+    ) -> None:
         self._lock = asyncio.Lock()
         self._playwright: Playwright | None = None
-        self._browser: Browser | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
+        self._profile_dir = profile_dir or settings.profile_dir(
+            settings.runtime_role,
+            'wildberries',
+        )
+        self._playwright_factory = playwright_factory or async_playwright
+        self._idle_sec = (
+            settings.wb_browser_idle_sec if idle_sec is None else idle_sec
+        )
+        self._profile_lock: ProfileLock | None = None
         self._last_used_monotonic = 0.0
         self._proxy_cycle: itertools.cycle[str] | None = None
         self._current_proxy: str | None = None
         self._consecutive_blocks = 0
         self._cooldown_until = 0.0
 
-    async def ensure_page(self) -> Page:
+    async def ensure_context(self) -> BrowserContext:
+        """Return the persistent context, opening it lazily."""
         async with self._lock:
             await self._respect_cooldown()
-            await self._close_if_idle()
-            if self._page is not None and not self._page.is_closed():
-                self._last_used_monotonic = time.monotonic()
-                return self._page
-            await self._start_fresh()
-            assert self._page is not None
+            await self._close_if_idle_inner()
+            return await self._ensure_context_inner()
+
+    async def ensure_page(self) -> Page:
+        """Preserve the legacy client API until Task 11 migration."""
+        async with self._lock:
+            await self._respect_cooldown()
+            await self._close_if_idle_inner()
+            context = await self._ensure_context_inner()
+            if self._page is None or self._page.is_closed():
+                self._page = await context.new_page()
+            self.touch()
             return self._page
 
     async def rotate_and_restart(self) -> Page:
+        """Close context, advance proxy and return a fresh legacy page."""
         async with self._lock:
             await self._respect_cooldown()
             await self._close_inner()
             self._advance_proxy()
-            await self._start_fresh()
-            assert self._page is not None
+            context = await self._ensure_context_inner()
+            self._page = await context.new_page()
+            self.touch()
             return self._page
 
     async def goto_and_wait(self, page: Page, url: str) -> None:
-        """Navigate and wait out WB's antibot challenge (headed sessions
-        usually clear it in 2-8s; a cold, never-warmed IP can take longer)."""
+        """Navigate and wait for Wildberries' headed antibot challenge."""
+        validate_main_frame_url('wildberries', url)
         await page.goto(url, wait_until='domcontentloaded', timeout=45_000)
+        validate_main_frame_url('wildberries', page.url)
         deadline = time.monotonic() + settings.wb_challenge_timeout_sec
         while time.monotonic() < deadline:
             try:
                 title = await page.title()
             except PlaywrightError:
-                # Mid-navigation (the challenge JS reloads the page) — retry.
                 await page.wait_for_timeout(300)
                 continue
             if title not in _PLACEHOLDER_TITLES:
                 return
             await page.wait_for_timeout(500)
-
-        raise BlockedError(f'WB antibot challenge did not resolve for {url}')
+        raise BlockedError('WB antibot challenge did not resolve')
 
     def note_block(self) -> None:
         self._consecutive_blocks += 1
@@ -101,6 +126,15 @@ class WBBrowserSession:
         self._consecutive_blocks = 0
         self._cooldown_until = 0.0
 
+    def touch(self) -> None:
+        """Record use without closing the persistent context."""
+        self._last_used_monotonic = time.monotonic()
+
+    async def close_if_idle(self) -> None:
+        """Close the browser after its configured idle interval."""
+        async with self._lock:
+            await self._close_if_idle_inner()
+
     async def close(self) -> None:
         async with self._lock:
             await self._close_inner()
@@ -110,53 +144,66 @@ class WBBrowserSession:
         if remaining <= 0:
             return
         raise BlockedError(
-            f'WB circuit open for {remaining:.0f}s more (anti-bot cooldown)'
+            f'WB circuit open for {remaining:.0f}s more (anti-bot cooldown)',
         )
+
+    async def _ensure_context_inner(self) -> BrowserContext:
+        if self._context is None:
+            await self._start_fresh()
+        assert self._context is not None
+        self.touch()
+        return self._context
 
     async def _start_fresh(self) -> None:
+        validate_single_browser_worker()
         if settings.wb_proxy_required and not settings.proxies:
-            raise BlockedError('WB_PROXY_REQUIRED=true but PROXY_LIST is empty')
-
+            raise BlockedError(
+                'WB_PROXY_REQUIRED=true but PROXY_LIST is empty',
+            )
+        proxy = self._pick_proxy()
         logger.info(
             'Starting WB browser session (proxy=%s)',
-            'yes' if self._pick_proxy() else 'no',
+            'yes' if proxy else 'no',
         )
-        self._playwright = await async_playwright().start()
-        launch_kwargs: dict[str, Any] = {
-            'headless': False,
-            'args': [
-                '--no-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-blink-features=AutomationControlled',
-            ],
-        }
-        proxy = self._pick_proxy()
         self._current_proxy = proxy
-        if proxy:
-            launch_kwargs['proxy'] = playwright_proxy_config(proxy)
-
+        self._profile_lock = ProfileLock(self._profile_dir)
+        self._profile_lock.acquire()
         try:
-            self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+            self._playwright = await self._playwright_factory().start()
+            launch_kwargs: dict[str, Any] = {
+                'user_data_dir': str(self._profile_dir),
+                'headless': False,
+                'args': chromium_runtime_args(),
+                'locale': 'ru-RU',
+                'timezone_id': 'Europe/Moscow',
+                'viewport': {'width': 1440, 'height': 900},
+                'user_agent': WB_DESKTOP_UA,
+                'extra_http_headers': {
+                    'Accept-Language': (
+                        'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
+                    ),
+                },
+            }
+            if proxy:
+                launch_kwargs['proxy'] = playwright_proxy_config(proxy)
+            self._context = (
+                await self._playwright.chromium.launch_persistent_context(
+                    **launch_kwargs,
+                )
+            )
+            await self._context.add_init_script(STEALTH_INIT_SCRIPT)
+            await _close_startup_pages(self._context)
+            self.touch()
         except PlaywrightError as exc:
+            await self._close_inner()
             if 'socks5 proxy authentication' in str(exc).lower():
                 raise BlockedError(
-                    'Chromium does not support authenticated SOCKS5 proxies '
-                    '(PROXY_LIST). Use an HTTP(S) proxy with auth, or an '
-                    'unauthenticated (IP-whitelisted) SOCKS5 proxy instead.'
+                    'Chromium does not support authenticated SOCKS5 proxies',
                 ) from exc
             raise
-        self._context = await self._browser.new_context(
-            locale='ru-RU',
-            timezone_id='Europe/Moscow',
-            viewport={'width': 1440, 'height': 900},
-            user_agent=WB_DESKTOP_UA,
-            extra_http_headers={
-                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-            },
-        )
-        await self._context.add_init_script(STEALTH_INIT_SCRIPT)
-        self._page = await self._context.new_page()
-        self._last_used_monotonic = time.monotonic()
+        except BaseException:
+            await self._close_inner()
+            raise
 
     def _pick_proxy(self) -> str | None:
         proxies = settings.proxies
@@ -178,25 +225,36 @@ class WBBrowserSession:
         self._current_proxy = next(self._proxy_cycle)
         logger.info('Rotating WB proxy')
 
-    async def _close_if_idle(self) -> None:
-        if self._page is None:
+    async def _close_if_idle_inner(self) -> None:
+        if self._context is None:
             return
         idle_sec = time.monotonic() - self._last_used_monotonic
-        if idle_sec < settings.wb_browser_idle_sec:
+        if idle_sec < self._idle_sec:
             return
         logger.info('Closing idle WB browser session')
         await self._close_inner()
 
     async def _close_inner(self) -> None:
-        if self._page is not None and not self._page.is_closed():
-            await self._page.close()
-        if self._context is not None:
-            await self._context.close()
-        if self._browser is not None:
-            await self._browser.close()
-        if self._playwright is not None:
-            await self._playwright.stop()
+        context = self._context
+        playwright = self._playwright
+        profile_lock = self._profile_lock
         self._page = None
         self._context = None
-        self._browser = None
         self._playwright = None
+        self._profile_lock = None
+        try:
+            if context is not None:
+                await context.close()
+        finally:
+            try:
+                if playwright is not None:
+                    await playwright.stop()
+            finally:
+                if profile_lock is not None:
+                    profile_lock.release()
+
+
+async def _close_startup_pages(context: BrowserContext) -> None:
+    for page in tuple(context.pages):
+        if not page.is_closed():
+            await page.close()

@@ -18,5 +18,22 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .ozon-profile/
+browser-profiles/
+.browser-profile/
+.browser-profiles/
+.wb-profile/
+.yandex-market-profile/
+**/.profile.lock
+**/SingletonLock
+**/SingletonCookie
+**/SingletonSocket
+**/Local State
+**/Default/Cookies
+**/Default/History
+**/Default/Login Data
+**/Default/Network Persistent State
+**/Default/Preferences
+**/Default/Secure Preferences
+**/Default/Web Data
 profile_default/
 graphify-out/
