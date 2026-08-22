@@ -143,26 +143,15 @@ class YandexMarketBrowserSession:
         context = self._context
         playwright = self._playwright
         profile_lock = self._profile_lock
-        errors: list[BaseException] = []
         if context is not None and not self._context_closed:
-            try:
-                await context.close()
-            except BaseException as exc:
-                errors.append(exc)
-            else:
-                self._context_closed = True
+            await context.close()
+            self._context_closed = True
+            self._page = None
+            self._context = None
         if playwright is not None and not self._playwright_stopped:
-            try:
-                await playwright.stop()
-            except BaseException as exc:
-                errors.append(exc)
-            else:
-                self._playwright_stopped = True
-        if errors:
-            raise errors[0]
-        self._page = None
-        self._context = None
-        self._playwright = None
-        self._profile_lock = None
+            await playwright.stop()
+            self._playwright_stopped = True
+            self._playwright = None
         if profile_lock is not None:
             profile_lock.release()
+        self._profile_lock = None

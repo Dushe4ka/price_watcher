@@ -460,7 +460,7 @@ class PersistentMarketplaceSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('--disable-dev-shm-usage', kwargs['args'])
         self.assertTrue(playwright.stopped)
 
-    async def test_close_failure_keeps_each_marketplace_profile_locked(
+    async def test_context_close_failure_retries_before_driver_stop(
         self,
     ) -> None:
         cases = (
@@ -497,6 +497,7 @@ class PersistentMarketplaceSessionTests(unittest.IsolatedAsyncioTestCase):
                         'context close failure',
                     ):
                         await session.close()
+                    self.assertEqual(0, playwright.stop_calls)
                     competing_lock = ProfileLock(profile_dir)
                     with self.assertRaises(ProfileInUseError):
                         competing_lock.acquire()
