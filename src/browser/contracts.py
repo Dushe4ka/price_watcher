@@ -9,12 +9,29 @@ from typing import Any, Protocol
 EventHandler = Callable[[Any], Awaitable[None] | None]
 
 
+class LocatorLike(Protocol):
+    """Locator surface shared by Page, Frame and FrameLocator objects."""
+
+    @property
+    def content_frame(self) -> LocatorLike:
+        """Return the locator boundary for an iframe's content."""
+
+    def locator(self, selector: str) -> LocatorLike:
+        """Create a descendant locator for a code-owned selector."""
+
+    async def click(self, *, timeout: float) -> None:
+        """Click the target within a bounded Playwright timeout."""
+
+
 class FrameLike(Protocol):
-    """The main-frame surface needed for redirect validation."""
+    """Frame surface needed for redirects and provider-owned controls."""
 
     @property
     def url(self) -> str:
         """Return the current frame URL."""
+
+    def locator(self, selector: str) -> LocatorLike:
+        """Create a locator owned by this exact frame."""
 
 
 class BrowserContextLike(Protocol):
@@ -42,6 +59,10 @@ class PageLike(Protocol):
     def main_frame(self) -> FrameLike:
         """Return the page main frame."""
 
+    @property
+    def frames(self) -> Sequence[FrameLike]:
+        """Return every frame owned by this exact page."""
+
     def is_closed(self) -> bool:
         """Return whether the task page is closed."""
 
@@ -53,6 +74,9 @@ class PageLike(Protocol):
 
     async def content(self) -> str:
         """Return serialized page HTML."""
+
+    def locator(self, selector: str) -> LocatorLike:
+        """Create a main-document locator for a code-owned selector."""
 
     async def evaluate(self, expression: str) -> Any:
         """Evaluate JavaScript in the page."""

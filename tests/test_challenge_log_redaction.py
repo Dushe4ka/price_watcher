@@ -39,6 +39,8 @@ class FailingHandler:
         self,
         page: SecretPage,
         detection: ChallengeDetection,
+        *,
+        timeout_ms: float,
     ) -> None:
         raise RuntimeError(
             'SENTINEL_RAW_EXCEPTION SENTINEL_TOKEN_VALUE '

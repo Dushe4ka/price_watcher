@@ -110,6 +110,95 @@ class ChallengeDetectorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(ChallengeType.NONE, detection.challenge_type)
 
+    async def test_passive_provider_sdks_are_not_a_challenge(self) -> None:
+        cases = (
+            (
+                '<script src="https://www.google.com/recaptcha/'
+                'api.js?render=fixture-key"></script>'
+            ),
+            (
+                '<script src="https://js.hcaptcha.com/1/api.js">'
+                '</script>'
+            ),
+            (
+                '<script src="https://challenges.cloudflare.com/'
+                'turnstile/v0/api.js"></script>'
+            ),
+        )
+
+        for html in cases:
+            with self.subTest(html=html):
+                detection = await detect_challenge(FixturePage(html))
+
+                self.assertIs(ChallengeType.NONE, detection.challenge_type)
+
+    async def test_comments_and_script_text_do_not_activate_markers(
+        self,
+    ) -> None:
+        html = (
+            '<!-- <div class="g-recaptcha"></div> -->'
+            '<script>'
+            'const example = "h-captcha-response cf-turnstile-response";'
+            'grecaptcha.execute("documentation-only");'
+            '</script>'
+        )
+
+        detection = await detect_challenge(FixturePage(html))
+
+        self.assertIs(ChallengeType.NONE, detection.challenge_type)
+
+    async def test_interactive_words_require_provider_structure(
+        self,
+    ) -> None:
+        html = (
+            '<div class="g-recaptcha" data-sitekey="fixture-key"></div>'
+            '<article>An image challenge and audio challenge comparison.'
+            '</article>'
+        )
+
+        detection = await detect_challenge(FixturePage(html))
+
+        self.assertIs(ChallengeType.RECAPTCHA_V2, detection.challenge_type)
+        self.assertFalse(detection.is_interactive)
+
+    async def test_provider_owned_interactive_controls_are_unsolvable(
+        self,
+    ) -> None:
+        cases = (
+            (
+                '<iframe title="reCAPTCHA audio challenge"></iframe>',
+                ChallengeType.RECAPTCHA_V2,
+            ),
+            (
+                '<iframe title="hCaptcha image challenge"></iframe>',
+                ChallengeType.HCAPTCHA,
+            ),
+            (
+                '<div class="cf-turnstile" '
+                'data-challenge-type="slider"></div>',
+                ChallengeType.TURNSTILE,
+            ),
+            (
+                '<iframe src="https://challenges.cloudflare.com/'
+                'turnstile/v0/widget" '
+                'title="Turnstile slider challenge"></iframe>',
+                ChallengeType.TURNSTILE,
+            ),
+            (
+                '<div class="g-recaptcha">'
+                '<button class="audio">Use audio</button>'
+                '</div>',
+                ChallengeType.RECAPTCHA_V2,
+            ),
+        )
+
+        for html, expected_type in cases:
+            with self.subTest(expected_type=expected_type):
+                detection = await detect_challenge(FixturePage(html))
+
+                self.assertIs(expected_type, detection.challenge_type)
+                self.assertTrue(detection.is_interactive)
+
 
 if __name__ == '__main__':
     unittest.main()

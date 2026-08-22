@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from typing import Protocol
+from urllib.parse import urlsplit
 
-from src.browser.contracts import PageLike
+from src.browser.contracts import FrameLike, LocatorLike, PageLike
 from src.captcha.models import ChallengeDetection, ChallengeType
 from src.captcha.ohmycaptcha_adapter import OhMyCaptchaAdapter
 
@@ -19,46 +20,11 @@ class ChallengeHandler(Protocol):
         self,
         page: PageLike,
         detection: ChallengeDetection,
+        *,
+        timeout_ms: float,
     ) -> None:
         """Attempt the challenge on ``page`` without creating browser state."""
 
-
-_RECAPTCHA_V2_CHECKBOX_JS = """
-() => {
-    const direct = document.querySelector('#recaptcha-anchor');
-    const frame = document.querySelector('iframe[title="reCAPTCHA"]');
-    const framed = frame?.contentDocument?.querySelector('#recaptcha-anchor');
-    (direct || framed)?.click();
-}
-"""
-
-_HCAPTCHA_CHECKBOX_JS = """
-() => {
-    const direct = document.querySelector('#checkbox');
-    const frame = document.querySelector(
-        'iframe[title="Widget containing checkbox for '
-        + 'hCaptcha security challenge"]'
-    );
-    const framed = frame?.contentDocument?.querySelector('#checkbox');
-    (direct || framed)?.click();
-}
-"""
-
-_TURNSTILE_CHECKBOX_JS = """
-() => {
-    const direct = document.querySelector(
-        '.cf-turnstile input[type="checkbox"], '
-        + '.ctp-checkbox-label, .cf-turnstile label'
-    );
-    const frame = document.querySelector(
-        'iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]'
-    );
-    const framed = frame?.contentDocument?.querySelector(
-        'input[type="checkbox"], .ctp-checkbox-label, label'
-    );
-    (direct || framed)?.click();
-}
-"""
 
 _RECAPTCHA_V3_TEMPLATE = """
 () => {
@@ -76,10 +42,38 @@ _RECAPTCHA_V3_TEMPLATE = """
 }
 """
 
-_CHECKBOX_SCRIPTS = {
-    ChallengeType.RECAPTCHA_V2: _RECAPTCHA_V2_CHECKBOX_JS,
-    ChallengeType.HCAPTCHA: _HCAPTCHA_CHECKBOX_JS,
-    ChallengeType.TURNSTILE: _TURNSTILE_CHECKBOX_JS,
+_FRAME_URL_CONTRACTS = {
+    ChallengeType.RECAPTCHA_V2: (
+        ('google.com', 'recaptcha.net'),
+        ('/recaptcha/', 'anchor'),
+    ),
+    ChallengeType.HCAPTCHA: (
+        ('hcaptcha.com',),
+        ('hcaptcha', 'frame=checkbox'),
+    ),
+    ChallengeType.TURNSTILE: (
+        ('challenges.cloudflare.com',),
+        ('/turnstile/',),
+    ),
+}
+
+_FRAME_TITLE_SELECTORS = {
+    ChallengeType.RECAPTCHA_V2: 'iframe[title="reCAPTCHA"]',
+    ChallengeType.HCAPTCHA: (
+        'iframe[title="Widget containing checkbox for '
+        'hCaptcha security challenge"]'
+    ),
+    ChallengeType.TURNSTILE: (
+        'iframe[title="Widget containing a Cloudflare security challenge"]'
+    ),
+}
+
+_CHECKBOX_SELECTORS = {
+    ChallengeType.RECAPTCHA_V2: '#recaptcha-anchor',
+    ChallengeType.HCAPTCHA: '#checkbox',
+    ChallengeType.TURNSTILE: (
+        'input[type="checkbox"], .ctp-checkbox-label, label'
+    ),
 }
 
 
@@ -107,6 +101,8 @@ class OhMyCaptchaHandler:
         self,
         page: PageLike,
         detection: ChallengeDetection,
+        *,
+        timeout_ms: float,
     ) -> None:
         if not self.supports(detection):
             return
@@ -118,8 +114,52 @@ class OhMyCaptchaHandler:
                 execute,
             )
         else:
-            expression = _CHECKBOX_SCRIPTS[detection.challenge_type]
+            await _click_provider_checkbox(
+                page,
+                detection.challenge_type,
+                timeout_ms,
+            )
+            return
         await page.evaluate(expression)
 
     def __repr__(self) -> str:
         return 'OhMyCaptchaHandler(mode=deterministic_same_page)'
+
+
+async def _click_provider_checkbox(
+    page: PageLike,
+    challenge_type: ChallengeType,
+    timeout_ms: float,
+) -> None:
+    frame = next(
+        (
+            candidate
+            for candidate in page.frames
+            if _matches_provider_frame(candidate, challenge_type)
+        ),
+        None,
+    )
+    owner: FrameLike | LocatorLike
+    if frame is not None:
+        owner = frame
+    else:
+        iframe = page.locator(_FRAME_TITLE_SELECTORS[challenge_type])
+        owner = iframe.content_frame
+    checkbox = owner.locator(_CHECKBOX_SELECTORS[challenge_type])
+    await checkbox.click(timeout=timeout_ms)
+
+
+def _matches_provider_frame(
+    frame: FrameLike,
+    challenge_type: ChallengeType,
+) -> bool:
+    hosts, markers = _FRAME_URL_CONTRACTS[challenge_type]
+    parsed = urlsplit(frame.url)
+    hostname = (parsed.hostname or '').lower()
+    if not any(
+        hostname == host or hostname.endswith(f'.{host}')
+        for host in hosts
+    ):
+        return False
+    candidate = f'{parsed.path}?{parsed.query}#{parsed.fragment}'.lower()
+    return all(marker in candidate for marker in markers)
