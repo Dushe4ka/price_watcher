@@ -70,6 +70,33 @@ class ChallengeDetectorTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertIs(expected_type, detection.challenge_type)
 
+    async def test_provider_ownership_beats_generic_v3_attributes(
+        self,
+    ) -> None:
+        cases = (
+            (
+                '<div class="cf-turnstile" data-sitekey="turnstile-key" '
+                'data-action="login"></div>',
+                ChallengeType.TURNSTILE,
+            ),
+            (
+                '<div class="checkout-widget" data-sitekey="site-key" '
+                'data-action="login"></div>',
+                ChallengeType.NONE,
+            ),
+            (
+                '<div class="grecaptcha-v3" data-sitekey="recaptcha-key" '
+                'data-action="login"></div>',
+                ChallengeType.RECAPTCHA_V3,
+            ),
+        )
+
+        for html, expected_type in cases:
+            with self.subTest(expected_type=expected_type):
+                detection = await detect_challenge(FixturePage(html))
+
+                self.assertIs(expected_type, detection.challenge_type)
+
     async def test_marks_interactive_challenge_without_exposing_content(
         self,
     ) -> None:

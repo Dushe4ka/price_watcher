@@ -134,9 +134,19 @@ def _active_providers(
     identifier = attrs.get('id', '')
     name = attrs.get('name', '')
     title = attrs.get('title', '')
+    recaptcha_identity = class_tokens | {identifier}
+    recaptcha_v3_owned = (
+        bool(
+            recaptcha_identity & {'grecaptcha-v3', 'recaptcha-v3'}
+        )
+        or (
+            'g-recaptcha' in class_tokens
+            and attrs.get('data-size', '') == 'invisible'
+        )
+    )
 
     if (
-        'g-recaptcha' in class_tokens
+        ('g-recaptcha' in class_tokens and not recaptcha_v3_owned)
         or identifier in ('g-recaptcha-response', 'recaptcha-anchor')
         or name == 'g-recaptcha-response'
         or (
@@ -153,14 +163,9 @@ def _active_providers(
     ):
         providers.add(ChallengeType.RECAPTCHA_V2)
 
-    recaptcha_identity = class_tokens | {identifier}
     if (
         'data-sitekey' in attrs
-        and (
-            'data-action' in attrs
-            or 'grecaptcha-v3' in recaptcha_identity
-            or 'recaptcha-v3' in recaptcha_identity
-        )
+        and recaptcha_v3_owned
     ):
         providers.add(ChallengeType.RECAPTCHA_V3)
 

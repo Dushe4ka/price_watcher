@@ -85,17 +85,37 @@ class MainFrameLocator:
     def locator(self, selector: str) -> MainFrameLocator:
         return self
 
+    async def get_attribute(
+        self,
+        name: str,
+        *,
+        timeout: float,
+    ) -> str | None:
+        return None
+
     async def click(self, *, timeout: float) -> None:
         self.page.main_frame_clicks += 1
 
 
 class IframeElementLocator:
-    def __init__(self, frame: OwnedFrame) -> None:
+    def __init__(self, page: TitleOwnedPage, frame: OwnedFrame) -> None:
+        self._page = page
         self._frame = frame
 
     @property
     def content_frame(self) -> OwnedFrame:
         return self._frame
+
+    async def get_attribute(
+        self,
+        name: str,
+        *,
+        timeout: float,
+    ) -> str | None:
+        self._page.attribute_timeouts.append(timeout)
+        if name == 'src':
+            return self._frame.url
+        return None
 
 
 class FrameOwnedPage(FakePage):
@@ -117,9 +137,10 @@ class TitleOwnedPage(FrameOwnedPage):
     def __init__(self, html: str, frame_url: str) -> None:
         super().__init__(html, frame_url)
         self.frames = ()
+        self.attribute_timeouts: list[float] = []
 
     def locator(self, selector: str) -> IframeElementLocator:
-        return IframeElementLocator(self.frame)
+        return IframeElementLocator(self, self.frame)
 
 
 class MissingCheckbox(FrameCheckbox):
@@ -237,7 +258,7 @@ class ChallengeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 '<iframe src="https://www.google.com/recaptcha/api2/'
                 'anchor"></iframe>',
                 'https://www.google.com/recaptcha/api2/anchor',
-                'recaptcha-anchor',
+                '#recaptcha-anchor',
             ),
             (
                 '<iframe src="https://newassets.hcaptcha.com/captcha/'
@@ -255,14 +276,17 @@ class ChallengeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     'https://challenges.cloudflare.com/turnstile/'
                     'v0/widget'
                 ),
-                'input[type="checkbox"]',
+                (
+                    'input[type="checkbox"], [role="checkbox"], '
+                    '.ctp-checkbox-label'
+                ),
             ),
         )
         handler = OhMyCaptchaHandler(
             OhMyCaptchaAdapter(vendor_root=VENDOR_ROOT)
         )
 
-        for html, frame_url, selector_marker in cases:
+        for html, frame_url, expected_selector in cases:
             with self.subTest(frame_url=frame_url):
                 page = FrameOwnedPage(html, frame_url)
                 coordinator = ChallengeCoordinator(
@@ -281,15 +305,20 @@ class ChallengeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     page.frame.checkbox.click_timeouts[0],
                     5000,
                 )
-                self.assertIn(selector_marker, page.frame.selectors[0])
+                self.assertEqual(
+                    expected_selector,
+                    page.frame.selectors[0],
+                )
                 self.assertEqual(0, page.main_frame_clicks)
                 self.assertEqual(0, page.evaluate_calls)
                 self.assertIs(ChallengeResolution.SOLVED, resolution)
 
     async def test_title_locator_stays_inside_owned_iframe(self) -> None:
         page = TitleOwnedPage(
-            '<iframe title="reCAPTCHA"></iframe>',
-            'about:blank',
+            '<iframe title="reCAPTCHA" '
+            'src="https://www.google.com/recaptcha/api2/anchor">'
+            '</iframe>',
+            'https://www.google.com/recaptcha/api2/anchor',
         )
         handler = OhMyCaptchaHandler(
             OhMyCaptchaAdapter(vendor_root=VENDOR_ROOT)
@@ -302,15 +331,63 @@ class ChallengeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(1, len(page.frame.checkbox.click_timeouts))
+        self.assertEqual(1, len(page.attribute_timeouts))
         self.assertEqual(0, page.main_frame_clicks)
         self.assertIs(ChallengeResolution.SOLVED, resolution)
+
+    async def test_title_does_not_authorize_untrusted_frame(self) -> None:
+        untrusted_urls = (
+            'https://evil.invalid/turnstile/widget',
+            (
+                'https://challenges.cloudflare.com/account'
+                '?next=/turnstile/widget'
+            ),
+            'http://challenges.cloudflare.com/turnstile/v0/widget',
+        )
+        handler = OhMyCaptchaHandler(
+            OhMyCaptchaAdapter(vendor_root=VENDOR_ROOT)
+        )
+
+        for frame_url in untrusted_urls:
+            with self.subTest(frame_url=frame_url):
+                page = TitleOwnedPage(
+                    '<iframe title="Widget containing a Cloudflare '
+                    'security challenge" src="fixture"></iframe>',
+                    frame_url,
+                )
+                coordinator = ChallengeCoordinator(
+                    (handler,),
+                    clock=lambda: 0.0,
+                )
+
+                with self.assertLogs(
+                    'src.captcha.coordinator',
+                    level='WARNING',
+                ) as logs:
+                    resolution = await coordinator.resolve(
+                        page,
+                        deadline=FakeDeadline(5.0),
+                    )
+
+                self.assertEqual([], page.frame.checkbox.click_timeouts)
+                self.assertEqual(1, len(page.attribute_timeouts))
+                self.assertIn(
+                    'challenge_handler_failed',
+                    '\n'.join(logs.output),
+                )
+                self.assertIs(
+                    ChallengeResolution.CHALLENGE_UNSOLVABLE,
+                    resolution,
+                )
 
     async def test_unavailable_iframe_checkbox_is_not_a_silent_noop(
         self,
     ) -> None:
         page = MissingFramePage(
-            '<iframe title="reCAPTCHA"></iframe>',
-            'about:blank',
+            '<iframe title="reCAPTCHA" '
+            'src="https://www.google.com/recaptcha/api2/anchor">'
+            '</iframe>',
+            'https://www.google.com/recaptcha/api2/anchor',
         )
         handler = OhMyCaptchaHandler(
             OhMyCaptchaAdapter(vendor_root=VENDOR_ROOT)

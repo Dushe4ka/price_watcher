@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Protocol
 from urllib.parse import urlsplit
 
-from src.browser.contracts import FrameLike, LocatorLike, PageLike
+from src.browser.contracts import FrameLike, FrameLocatorLike, PageLike
 from src.captcha.models import ChallengeDetection, ChallengeType
 from src.captcha.ohmycaptcha_adapter import OhMyCaptchaAdapter
 
@@ -42,19 +42,10 @@ _RECAPTCHA_V3_TEMPLATE = """
 }
 """
 
-_FRAME_URL_CONTRACTS = {
-    ChallengeType.RECAPTCHA_V2: (
-        ('google.com', 'recaptcha.net'),
-        ('/recaptcha/', 'anchor'),
-    ),
-    ChallengeType.HCAPTCHA: (
-        ('hcaptcha.com',),
-        ('hcaptcha', 'frame=checkbox'),
-    ),
-    ChallengeType.TURNSTILE: (
-        ('challenges.cloudflare.com',),
-        ('/turnstile/',),
-    ),
+_FRAME_HOSTS = {
+    ChallengeType.RECAPTCHA_V2: ('google.com', 'recaptcha.net'),
+    ChallengeType.HCAPTCHA: ('hcaptcha.com',),
+    ChallengeType.TURNSTILE: ('challenges.cloudflare.com',),
 }
 
 _FRAME_TITLE_SELECTORS = {
@@ -72,7 +63,8 @@ _CHECKBOX_SELECTORS = {
     ChallengeType.RECAPTCHA_V2: '#recaptcha-anchor',
     ChallengeType.HCAPTCHA: '#checkbox',
     ChallengeType.TURNSTILE: (
-        'input[type="checkbox"], .ctp-checkbox-label, label'
+        'input[type="checkbox"], [role="checkbox"], '
+        '.ctp-checkbox-label'
     ),
 }
 
@@ -139,11 +131,14 @@ async def _click_provider_checkbox(
         ),
         None,
     )
-    owner: FrameLike | LocatorLike
+    owner: FrameLike | FrameLocatorLike
     if frame is not None:
         owner = frame
     else:
         iframe = page.locator(_FRAME_TITLE_SELECTORS[challenge_type])
+        source = await iframe.get_attribute('src', timeout=timeout_ms)
+        if not _matches_provider_url(source, challenge_type):
+            raise RuntimeError('provider frame ownership is unavailable')
         owner = iframe.content_frame
     checkbox = owner.locator(_CHECKBOX_SELECTORS[challenge_type])
     await checkbox.click(timeout=timeout_ms)
@@ -153,13 +148,30 @@ def _matches_provider_frame(
     frame: FrameLike,
     challenge_type: ChallengeType,
 ) -> bool:
-    hosts, markers = _FRAME_URL_CONTRACTS[challenge_type]
-    parsed = urlsplit(frame.url)
+    return _matches_provider_url(frame.url, challenge_type)
+
+
+def _matches_provider_url(
+    url: str | None,
+    challenge_type: ChallengeType,
+) -> bool:
+    hosts = _FRAME_HOSTS[challenge_type]
+    parsed = urlsplit(url or '')
+    if parsed.scheme.lower() != 'https':
+        return False
     hostname = (parsed.hostname or '').lower()
     if not any(
         hostname == host or hostname.endswith(f'.{host}')
         for host in hosts
     ):
         return False
-    candidate = f'{parsed.path}?{parsed.query}#{parsed.fragment}'.lower()
-    return all(marker in candidate for marker in markers)
+    path = parsed.path.lower()
+    if challenge_type is ChallengeType.RECAPTCHA_V2:
+        return (
+            path.startswith('/recaptcha/')
+            and path.rstrip('/').endswith('/anchor')
+        )
+    if challenge_type is ChallengeType.HCAPTCHA:
+        fragment_parts = frozenset(parsed.fragment.lower().split('&'))
+        return 'hcaptcha' in path and 'frame=checkbox' in fragment_parts
+    return path.startswith('/turnstile/')
