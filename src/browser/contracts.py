@@ -27,6 +27,14 @@ class FrameLike(Protocol):
         """Create a locator owned by this exact frame."""
 
 
+class NavigationResponseLike(Protocol):
+    """Response metadata returned by a main-frame navigation."""
+
+    @property
+    def status(self) -> int:
+        """Return the final HTTP response status."""
+
+
 class BrowserContextLike(Protocol):
     """Persistent browser context boundary used by the lease manager."""
 
@@ -67,6 +75,15 @@ class PageLike(Protocol):
 
     async def content(self) -> str:
         """Return serialized page HTML."""
+
+    async def goto(
+        self,
+        url: str,
+        *,
+        wait_until: str,
+        timeout: float,
+    ) -> NavigationResponseLike | None:
+        """Navigate this page with an explicit Playwright timeout."""
 
     async def evaluate(self, expression: str) -> Any:
         """Evaluate JavaScript in the page."""

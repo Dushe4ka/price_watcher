@@ -1,0 +1,504 @@
+from __future__ import annotations
+
+import json
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from src.captcha.models import ChallengeResolution
+from src.marketplaces.contracts import (
+    CategoryRequest,
+    ProductRequest,
+    SearchRequest,
+    SourceOutcome,
+)
+from src.marketplaces.errors import SafeErrorCode
+from src.marketplaces.sources.browser import (
+    OzonBrowserSource,
+    WildberriesBrowserSource,
+    YandexMarketBrowserSource,
+)
+from tests.browser_source_fakes import (
+    BrokenEvaluationPage,
+    BrokenContentPage,
+    FakeCoordinator,
+    FakeManager,
+    FakePage,
+)
+
+
+FIXTURES = Path(__file__).parent / 'fixtures' / 'marketplaces'
+OZON_API_URL = 'https://www.ozon.ru/api/entrypoint-api.bx/page/json/v2'
+
+
+def _fixture(path: str) -> str:
+    return (FIXTURES / path).read_text(encoding='utf-8')
+
+
+def _wb_card() -> dict[str, str | None]:
+    return {
+        'nmId': '920001',
+        'title': 'Synthetic WB Item',
+        'brand': None,
+        'imageUrl': None,
+        'priceCurrent': '750',
+        'priceOld': None,
+        'ratingValue': None,
+        'reviewText': None,
+    }
+
+
+class BrowserSourceHappyPathTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ozon_product_uses_canonical_widget_mapper(self) -> None:
+        page = FakePage(
+            html='<html>Ozon</html>',
+            evaluation={
+                'status': 200,
+                'url': OZON_API_URL,
+                'body': _fixture('ozon/success.json'),
+            },
+        )
+        source = OzonBrowserSource(FakeManager(page), FakeCoordinator())
+
+        result = await source.parse_product(ProductRequest('910001'))
+
+        self.assertEqual(SourceOutcome.SUCCESS, result.outcome)
+        assert result.value is not None
+        self.assertEqual('910001', result.value.external_id)
+
+    async def test_ozon_search_returns_bounded_products(self) -> None:
+        page = FakePage(
+            html='<html>Ozon</html>',
+            evaluation={
+                'status': 200,
+                'url': OZON_API_URL,
+                'body': _fixture('ozon/success.json'),
+            },
+        )
+        source = OzonBrowserSource(FakeManager(page), FakeCoordinator())
+
+        result = await source.search_products(
+            SearchRequest(query='synthetic', limit=1),
+        )
+
+        self.assertEqual(SourceOutcome.SUCCESS, result.outcome)
+        assert result.value is not None
+        product_ids = tuple(product.external_id for product in result.value)
+        self.assertEqual(('910001',), product_ids)
+
+    async def test_ozon_category_uses_trusted_slug_mapping(self) -> None:
+        page = FakePage(
+            html='<html>Ozon</html>',
+            evaluation={
+                'status': 200,
+                'url': OZON_API_URL,
+                'body': _fixture('ozon/success.json'),
+            },
+        )
+        source = OzonBrowserSource(
+            FakeManager(page),
+            FakeCoordinator(),
+            category_urls={'synthetic': 'https://www.ozon.ru/category/1/'},
+        )
+
+        result = await source.crawl_category(
+            CategoryRequest(category_slug='synthetic', limit=1),
+        )
+
+        self.assertEqual(SourceOutcome.SUCCESS, result.outcome)
+        assert result.value is not None
+        self.assertEqual(['910001'], result.value.product_ids)
+
+    async def test_wildberries_product_uses_existing_dom_mapper(self) -> None:
+        page = FakePage(
+            html=_fixture('wildberries/success.html'),
+            evaluation={
+                'priceCurrent': '750',
+                'pageTitle': 'Synthetic WB Item 920001 купить за 750 ₽',
+            },
+        )
+        source = WildberriesBrowserSource(
+            FakeManager(page),
+            FakeCoordinator(),
+        )
+
+        result = await source.parse_product(ProductRequest('920001'))
+
+        self.assertEqual(SourceOutcome.SUCCESS, result.outcome)
+        assert result.value is not None
+        self.assertEqual('920001', result.value.external_id)
+
+    async def test_wildberries_search_uses_existing_card_mapper(self) -> None:
+        page = FakePage(
+            html=_fixture('wildberries/success.html'),
+            evaluation=[_wb_card()],
+        )
+        source = WildberriesBrowserSource(
+            FakeManager(page),
+            FakeCoordinator(),
+        )
+
+        result = await source.search_products(
+            SearchRequest(query='synthetic', limit=1),
+        )
+
+        self.assertEqual(SourceOutcome.SUCCESS, result.outcome)
+        assert result.value is not None
+        product_ids = tuple(product.external_id for product in result.value)
+        self.assertEqual(('920001',), product_ids)
+
+    async def test_wildberries_category_uses_trusted_slug_mapping(
+        self,
+    ) -> None:
+        page = FakePage(
+            html=_fixture('wildberries/success.html'),
+            evaluation=[_wb_card()],
+        )
+        source = WildberriesBrowserSource(
+            FakeManager(page),
+            FakeCoordinator(),
+            category_urls={
+                'synthetic': 'https://www.wildberries.ru/catalog/1/',
+            },
+        )
+
+        result = await source.crawl_category(
+            CategoryRequest(category_slug='synthetic', limit=1),
+        )
+
+        self.assertEqual(SourceOutcome.SUCCESS, result.outcome)
+        assert result.value is not None
+        self.assertEqual(['920001'], result.value.product_ids)
+
+    async def test_yandex_product_uses_existing_json_ld_parser(self) -> None:
+        page = FakePage(html=_fixture('yandex_market/success.html'))
+        source = YandexMarketBrowserSource(
+            FakeManager(page),
+            FakeCoordinator(),
+        )
+
+        result = await source.parse_product(ProductRequest('930001'))
+
+        self.assertEqual(SourceOutcome.SUCCESS, result.outcome)
+        assert result.value is not None
+        self.assertEqual('930001', result.value.external_id)
+
+    async def test_yandex_search_returns_bounded_products(self) -> None:
+        page = FakePage(html=_fixture('yandex_market/success.html'))
+        source = YandexMarketBrowserSource(
+            FakeManager(page),
+            FakeCoordinator(),
+        )
+
+        result = await source.search_products(
+            SearchRequest(query='synthetic', limit=1),
+        )
+
+        self.assertEqual(SourceOutcome.SUCCESS, result.outcome)
+        assert result.value is not None
+        product_ids = tuple(product.external_id for product in result.value)
+        self.assertEqual(('930001',), product_ids)
+
+    async def test_yandex_category_uses_trusted_slug_mapping(self) -> None:
+        page = FakePage(html=_fixture('yandex_market/success.html'))
+        source = YandexMarketBrowserSource(
+            FakeManager(page),
+            FakeCoordinator(),
+            category_urls={
+                'synthetic': 'https://market.yandex.ru/catalog--x/1',
+            },
+        )
+
+        result = await source.crawl_category(
+            CategoryRequest(category_slug='synthetic', limit=1),
+        )
+
+        self.assertEqual(SourceOutcome.SUCCESS, result.outcome)
+        assert result.value is not None
+        self.assertEqual(['930001'], result.value.product_ids)
+
+
+class BrowserSourceOutcomeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_valid_empty_search_is_empty_for_each_marketplace(
+        self,
+    ) -> None:
+        sources = (
+            OzonBrowserSource(
+                FakeManager(FakePage(
+                    html='<html>Ozon</html>',
+                    evaluation={
+                        'status': 200,
+                        'url': OZON_API_URL,
+                        'body': _fixture('ozon/empty.json'),
+                    },
+                )),
+                FakeCoordinator(),
+            ),
+            WildberriesBrowserSource(
+                FakeManager(FakePage(
+                    html=_fixture('wildberries/empty.html'),
+                    evaluation=[],
+                )),
+                FakeCoordinator(),
+            ),
+            YandexMarketBrowserSource(
+                FakeManager(FakePage(
+                    html=_fixture('yandex_market/empty.html'),
+                )),
+                FakeCoordinator(),
+            ),
+        )
+
+        for source in sources:
+            with self.subTest(source=type(source).__name__):
+                result = await source.search_products(
+                    SearchRequest(query='synthetic', limit=1),
+                )
+                self.assertEqual(SourceOutcome.EMPTY, result.outcome)
+
+    async def test_valid_empty_product_is_not_found(self) -> None:
+        page = FakePage(html=_fixture('yandex_market/empty.html'))
+        source = YandexMarketBrowserSource(
+            FakeManager(page),
+            FakeCoordinator(),
+        )
+
+        result = await source.parse_product(ProductRequest('930001'))
+
+        self.assertEqual(SourceOutcome.NOT_FOUND, result.outcome)
+
+    async def test_product_http_not_found_is_not_found(self) -> None:
+        page = FakePage(html='unused', status=404)
+        source = YandexMarketBrowserSource(
+            FakeManager(page),
+            FakeCoordinator(),
+        )
+
+        result = await source.parse_product(ProductRequest('930001'))
+
+        self.assertEqual(SourceOutcome.NOT_FOUND, result.outcome)
+
+    async def test_fake_empty_shell_is_parse_drift(self) -> None:
+        page = FakePage(html=_fixture('yandex_market/drift.html'))
+        source = YandexMarketBrowserSource(
+            FakeManager(page),
+            FakeCoordinator(),
+        )
+
+        result = await source.search_products(
+            SearchRequest(query='synthetic', limit=1),
+        )
+
+        self.assertEqual(SourceOutcome.PARSE_DRIFT, result.outcome)
+
+    async def test_initial_interactive_challenge_is_safe_failure(self) -> None:
+        page = FakePage(html='unused')
+        coordinator = FakeCoordinator(
+            ChallengeResolution.CHALLENGE_UNSOLVABLE,
+        )
+        source = YandexMarketBrowserSource(FakeManager(page), coordinator)
+
+        result = await source.parse_product(ProductRequest('930001'))
+
+        self.assertEqual(SourceOutcome.CHALLENGE, result.outcome)
+        self.assertEqual(
+            SafeErrorCode.CHALLENGE_UNSUPPORTED,
+            result.attempt.error_code,
+        )
+
+    async def test_post_fetch_challenge_is_safe_failure(self) -> None:
+        page = FakePage(html=_fixture('yandex_market/success.html'))
+        coordinator = FakeCoordinator(
+            ChallengeResolution.NO_CHALLENGE,
+            ChallengeResolution.CHALLENGE_UNSOLVABLE,
+        )
+        source = YandexMarketBrowserSource(FakeManager(page), coordinator)
+
+        result = await source.parse_product(ProductRequest('930001'))
+
+        self.assertEqual(SourceOutcome.CHALLENGE, result.outcome)
+
+    async def test_solved_challenge_still_requires_structural_validation(
+        self,
+    ) -> None:
+        page = FakePage(html=_fixture('yandex_market/drift.html'))
+        coordinator = FakeCoordinator(
+            ChallengeResolution.SOLVED,
+            ChallengeResolution.NO_CHALLENGE,
+        )
+        source = YandexMarketBrowserSource(FakeManager(page), coordinator)
+
+        result = await source.search_products(
+            SearchRequest(query='synthetic', limit=1),
+        )
+
+        self.assertEqual(SourceOutcome.PARSE_DRIFT, result.outcome)
+
+    async def test_rate_limit_is_explicit(self) -> None:
+        page = FakePage(
+            html='unused',
+            evaluation={
+                'status': 429,
+                'url': OZON_API_URL,
+                'body': '',
+            },
+        )
+        source = OzonBrowserSource(FakeManager(page), FakeCoordinator())
+
+        result = await source.parse_product(ProductRequest('910001'))
+
+        self.assertEqual(SourceOutcome.RATE_LIMITED, result.outcome)
+        self.assertEqual(SafeErrorCode.RATE_LIMITED, result.attempt.error_code)
+
+    async def test_wrong_host_ozon_capture_is_rejected(self) -> None:
+        page = FakePage(
+            html='unused',
+            evaluation={
+                'status': 200,
+                'url': 'https://attacker.invalid/synthetic.json',
+                'body': _fixture('ozon/success.json'),
+            },
+        )
+        source = OzonBrowserSource(FakeManager(page), FakeCoordinator())
+
+        result = await source.parse_product(ProductRequest('910001'))
+
+        self.assertEqual(SourceOutcome.INVALID_CONFIG, result.outcome)
+
+    async def test_ozon_antibot_redirect_is_challenge(self) -> None:
+        page = FakePage(
+            html='unused',
+            evaluation={
+                'status': 307,
+                'url': OZON_API_URL,
+                'body': '',
+            },
+        )
+        source = OzonBrowserSource(FakeManager(page), FakeCoordinator())
+
+        result = await source.parse_product(ProductRequest('910001'))
+
+        self.assertEqual(SourceOutcome.CHALLENGE, result.outcome)
+        self.assertEqual(
+            SafeErrorCode.CHALLENGE_DETECTED,
+            result.attempt.error_code,
+        )
+
+    async def test_closed_page_is_transport_error(self) -> None:
+        page = FakePage(html='unused')
+        page.closed = True
+        source = YandexMarketBrowserSource(
+            FakeManager(page),
+            FakeCoordinator(),
+        )
+
+        result = await source.parse_product(ProductRequest('930001'))
+
+        self.assertEqual(SourceOutcome.TRANSPORT_ERROR, result.outcome)
+        self.assertEqual(
+            SafeErrorCode.TRANSPORT_FAILED,
+            result.attempt.error_code,
+        )
+
+    async def test_closed_context_failure_is_transport_error(self) -> None:
+        manager = FakeManager(
+            FakePage(html='unused'),
+            lease_error=RuntimeError('synthetic closed context'),
+        )
+        source = YandexMarketBrowserSource(manager, FakeCoordinator())
+
+        result = await source.parse_product(ProductRequest('930001'))
+
+        self.assertEqual(SourceOutcome.TRANSPORT_ERROR, result.outcome)
+
+    async def test_malformed_ozon_payload_is_parse_drift(self) -> None:
+        page = FakePage(
+            html='unused',
+            evaluation={
+                'status': 200,
+                'url': OZON_API_URL,
+                'body': '{malformed',
+            },
+        )
+        source = OzonBrowserSource(FakeManager(page), FakeCoordinator())
+
+        result = await source.parse_product(ProductRequest('910001'))
+
+        self.assertEqual(SourceOutcome.PARSE_DRIFT, result.outcome)
+
+    async def test_content_exception_does_not_escape_or_render_raw_detail(
+        self,
+    ) -> None:
+        page = BrokenContentPage(html='unused')
+        source = YandexMarketBrowserSource(
+            FakeManager(page),
+            FakeCoordinator(),
+        )
+
+        result = await source.parse_product(ProductRequest('930001'))
+
+        self.assertEqual(SourceOutcome.TRANSPORT_ERROR, result.outcome)
+        self.assertNotIn('synthetic-sensitive', repr(result))
+
+    async def test_mapper_exception_is_parse_drift(self) -> None:
+        page = FakePage(
+            html='<html>Ozon</html>',
+            evaluation={
+                'status': 200,
+                'url': OZON_API_URL,
+                'body': _fixture('ozon/success.json'),
+            },
+        )
+        source = OzonBrowserSource(FakeManager(page), FakeCoordinator())
+
+        with patch(
+            'src.marketplaces.sources.browser.extract_product_summary_map',
+            side_effect=RuntimeError('synthetic mapper drift'),
+        ):
+            result = await source.parse_product(ProductRequest('910001'))
+
+        self.assertEqual(SourceOutcome.PARSE_DRIFT, result.outcome)
+
+    async def test_wb_dom_evaluation_error_is_parse_drift(self) -> None:
+        page = BrokenEvaluationPage(
+            html=_fixture('wildberries/success.html'),
+        )
+        source = WildberriesBrowserSource(
+            FakeManager(page),
+            FakeCoordinator(),
+        )
+
+        result = await source.search_products(
+            SearchRequest(query='synthetic', limit=1),
+        )
+
+        self.assertEqual(SourceOutcome.PARSE_DRIFT, result.outcome)
+
+    async def test_invalid_ozon_capture_shape_is_parse_drift(self) -> None:
+        page = FakePage(html='unused', evaluation=['not', 'a', 'mapping'])
+        source = OzonBrowserSource(FakeManager(page), FakeCoordinator())
+
+        result = await source.parse_product(ProductRequest('910001'))
+
+        self.assertEqual(SourceOutcome.PARSE_DRIFT, result.outcome)
+
+    async def test_ozon_payload_is_not_retained_by_result(self) -> None:
+        marker = 'synthetic-sensitive-raw-payload'
+        body = json.dumps({'unexpectedSyntheticEnvelope': marker})
+        page = FakePage(
+            html='unused',
+            evaluation={
+                'status': 200,
+                'url': OZON_API_URL,
+                'body': body,
+            },
+        )
+        source = OzonBrowserSource(FakeManager(page), FakeCoordinator())
+
+        result = await source.parse_product(ProductRequest('910001'))
+
+        self.assertNotIn(marker, repr(result))
+
+
+if __name__ == '__main__':
+    unittest.main()

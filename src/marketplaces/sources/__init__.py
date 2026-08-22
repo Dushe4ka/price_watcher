@@ -1,5 +1,10 @@
 """Typed marketplace source adapters."""
 
+from src.marketplaces.sources.browser import (
+    OzonBrowserSource,
+    WildberriesBrowserSource,
+    YandexMarketBrowserSource,
+)
 from src.marketplaces.sources.protocols import (
     CategorySource,
     MarketplaceSourceError,
@@ -10,6 +15,9 @@ from src.marketplaces.sources.protocols import (
 __all__ = (
     'CategorySource',
     'MarketplaceSourceError',
+    'OzonBrowserSource',
     'ProductSource',
     'SearchSource',
+    'WildberriesBrowserSource',
+    'YandexMarketBrowserSource',
 )
