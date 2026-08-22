@@ -7,6 +7,7 @@ are configured.
 
 from __future__ import annotations
 
+import math
 import time
 from decimal import Decimal, InvalidOperation
 from typing import Any, TypeVar
@@ -58,7 +59,7 @@ class ApifySource:
             return _result(SourceOutcome.EMPTY, None, started)
         try:
             products = _map_products(self._marketplace, dataset, request.limit)
-        except ValueError:
+        except (InvalidOperation, OverflowError, TypeError, ValueError):
             return _failure(
                 SourceOutcome.PARSE_DRIFT,
                 SafeErrorCode.PARSE_DRIFT,
@@ -92,7 +93,7 @@ class ApifySource:
             product = _map_product(self._marketplace, dataset[0])
             if product.external_id != request.product_id:
                 raise ValueError('synthetic product id mismatch')
-        except ValueError:
+        except (InvalidOperation, OverflowError, TypeError, ValueError):
             return _failure(
                 SourceOutcome.PARSE_DRIFT,
                 SafeErrorCode.PARSE_DRIFT,
@@ -116,7 +117,7 @@ class ApifySource:
             return _result(SourceOutcome.EMPTY, None, started)
         try:
             products = _map_products(self._marketplace, dataset, request.limit)
-        except ValueError:
+        except (InvalidOperation, OverflowError, TypeError, ValueError):
             return _failure(
                 SourceOutcome.PARSE_DRIFT,
                 SafeErrorCode.PARSE_DRIFT,
@@ -227,7 +228,7 @@ def _price(value: object) -> Decimal:
         raise ValueError('invalid synthetic price')
     try:
         price = Decimal(str(value))
-    except (InvalidOperation, ValueError) as exc:
+    except (InvalidOperation, OverflowError, TypeError, ValueError) as exc:
         raise ValueError('invalid synthetic price') from exc
     if not price.is_finite() or price <= 0:
         raise ValueError('invalid synthetic price')
@@ -251,7 +252,13 @@ def _optional_float(value: object) -> float | None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError('invalid synthetic number')
-    return float(value)
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError('invalid synthetic number') from exc
+    if not math.isfinite(number):
+        raise ValueError('invalid synthetic number')
+    return number
 
 
 def _optional_nonnegative_int(value: object) -> int | None:

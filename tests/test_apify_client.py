@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from collections.abc import AsyncIterator
 
 import httpx
 
@@ -42,6 +43,18 @@ def client_factory(handler: httpx.AsyncBaseTransport) -> object:
     return factory
 
 
+class _ChunkStream(httpx.AsyncByteStream):
+    def __init__(self, chunks: tuple[bytes, ...]) -> None:
+        self._chunks = chunks
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self._chunks:
+            yield chunk
+
+    async def aclose(self) -> None:
+        return None
+
+
 class ApifyActorInputTests(unittest.TestCase):
     def test_search_actor_input_is_code_owned(self) -> None:
         from src.marketplaces.apify_client import build_actor_input
@@ -57,6 +70,20 @@ class ApifyActorInputTests(unittest.TestCase):
         self.assertNotIn('actorId', payload)
         self.assertNotIn('proxy', payload)
 
+    def test_search_actor_input_repr_redacts_query(self) -> None:
+        from src.marketplaces.apify_client import build_actor_input
+
+        query = 'synthetic-query-sentinel'
+        payload = build_actor_input(
+            'ozon',
+            MarketplaceOperation.SEARCH_PRODUCTS,
+            SearchRequest(query=query, limit=3),
+        )
+
+        self.assertEqual(query, json.loads(json.dumps(payload))['searchQuery'])
+        self.assertNotIn(query, repr(payload))
+        self.assertNotIn(query, str(payload))
+
     def test_product_actor_input_builds_fixed_marketplace_url(self) -> None:
         from src.marketplaces.apify_client import build_actor_input
 
@@ -70,6 +97,22 @@ class ApifyActorInputTests(unittest.TestCase):
                          payload['productUrl'])
         self.assertNotIn('actorId', payload)
         self.assertNotIn('proxy', payload)
+
+    def test_product_actor_input_repr_redacts_product_url(self) -> None:
+        from src.marketplaces.apify_client import build_actor_input
+
+        product_id = '940001'
+        payload = build_actor_input(
+            'ozon',
+            MarketplaceOperation.PARSE_PRODUCT,
+            ProductRequest(product_id),
+        )
+
+        product_url = 'https://www.ozon.ru/product/940001/'
+        self.assertEqual(product_url,
+                         json.loads(json.dumps(payload))['productUrl'])
+        self.assertNotIn(product_id, repr(payload))
+        self.assertNotIn(product_url, repr(payload))
 
 
 class ApifyClientTests(unittest.IsolatedAsyncioTestCase):
@@ -121,6 +164,7 @@ class ApifyClientTests(unittest.IsolatedAsyncioTestCase):
             (401, SourceOutcome.AUTH_ERROR, SafeErrorCode.AUTH_FAILED),
             (403, SourceOutcome.AUTH_ERROR, SafeErrorCode.AUTH_FAILED),
             (429, SourceOutcome.RATE_LIMITED, SafeErrorCode.RATE_LIMITED),
+            (400, SourceOutcome.INVALID_CONFIG, SafeErrorCode.INVALID_CONFIG),
             (500, SourceOutcome.TRANSPORT_ERROR,
              SafeErrorCode.TRANSPORT_FAILED),
         )
@@ -172,6 +216,144 @@ class ApifyClientTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(SourceOutcome.PARSE_DRIFT, raised.exception.outcome)
+
+    async def test_invalid_json_has_no_raw_exception_chain(self) -> None:
+        from src.marketplaces.apify_client import ApifyClient
+
+        marker = 'synthetic-invalid-json-sentinel'
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=marker, request=request)
+
+        client = ApifyClient(
+            make_settings(),
+            client_factory(httpx.MockTransport(handler)),
+        )
+        with self.assertRaises(MarketplaceSourceError) as raised:
+            await client.run_actor(
+                'ozon',
+                MarketplaceOperation.SEARCH_PRODUCTS,
+                SearchRequest(query='synthetic query', limit=3),
+            )
+
+        self.assertEqual(SourceOutcome.PARSE_DRIFT, raised.exception.outcome)
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertIsNone(raised.exception.__context__)
+        self.assertNotIn(marker, repr(raised.exception))
+
+    async def test_transport_failure_has_no_raw_exception_chain(self) -> None:
+        from src.marketplaces.apify_client import ApifyClient
+
+        marker = 'apify-token-sentinel'
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError(marker, request=request)
+
+        client = ApifyClient(
+            make_settings(),
+            client_factory(httpx.MockTransport(handler)),
+        )
+        with self.assertRaises(MarketplaceSourceError) as raised:
+            await client.run_actor(
+                'ozon',
+                MarketplaceOperation.SEARCH_PRODUCTS,
+                SearchRequest(query='synthetic query', limit=3),
+            )
+
+        self.assertEqual(
+            SourceOutcome.TRANSPORT_ERROR,
+            raised.exception.outcome,
+        )
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertIsNone(raised.exception.__context__)
+        self.assertNotIn(marker, repr(raised.exception))
+
+    async def test_oversized_stream_is_typed_without_retry(self) -> None:
+        from src.marketplaces.apify_client import ApifyClient
+
+        body = b'[{"id":"940001"}]'
+        calls = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                200,
+                stream=_ChunkStream((body[:5], body[5:])),
+                request=request,
+            )
+
+        settings = make_settings(marketplace_max_content_bytes=len(body) - 1)
+        client = ApifyClient(
+            settings,
+            client_factory(httpx.MockTransport(handler)),
+        )
+        with self.assertRaises(MarketplaceSourceError) as raised:
+            await client.run_actor(
+                'ozon',
+                MarketplaceOperation.SEARCH_PRODUCTS,
+                SearchRequest(query='synthetic query', limit=3),
+            )
+
+        self.assertEqual(
+            SourceOutcome.TRANSPORT_ERROR,
+            raised.exception.outcome,
+        )
+        self.assertEqual(SafeErrorCode.CONTENT_TOO_LARGE,
+                         raised.exception.error_code)
+        self.assertEqual(1, calls)
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertIsNone(raised.exception.__context__)
+
+    async def test_stream_at_content_limit_is_parsed(self) -> None:
+        from src.marketplaces.apify_client import ApifyClient
+
+        body = b'[{"id":"940001"}]'
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                stream=_ChunkStream((body[:5], body[5:])),
+                request=request,
+            )
+
+        settings = make_settings(marketplace_max_content_bytes=len(body))
+        client = ApifyClient(
+            settings,
+            client_factory(httpx.MockTransport(handler)),
+        )
+        result = await client.run_actor(
+            'ozon',
+            MarketplaceOperation.SEARCH_PRODUCTS,
+            SearchRequest(query='synthetic query', limit=3),
+        )
+
+        self.assertEqual([{'id': '940001'}], result)
+
+    async def test_huge_retry_after_is_still_rate_limited(self) -> None:
+        from src.marketplaces.apify_client import ApifyClient
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                429,
+                headers={'Retry-After': '9' * 5000},
+                request=request,
+            )
+
+        client = ApifyClient(
+            make_settings(),
+            client_factory(httpx.MockTransport(handler)),
+        )
+        with self.assertRaises(MarketplaceSourceError) as raised:
+            await client.run_actor(
+                'ozon',
+                MarketplaceOperation.SEARCH_PRODUCTS,
+                SearchRequest(query='synthetic query', limit=3),
+            )
+
+        self.assertEqual(SourceOutcome.RATE_LIMITED, raised.exception.outcome)
+        retry_after = getattr(raised.exception, 'retry_after_seconds')
+        self.assertTrue(retry_after is None or retry_after <= 300)
 
 
 if __name__ == '__main__':

@@ -195,6 +195,49 @@ class ApifySourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(SourceOutcome.PARSE_DRIFT, result.outcome)
         self.assertEqual(SafeErrorCode.PARSE_DRIFT, result.attempt.error_code)
 
+    async def test_nonfinite_and_overflow_numeric_values_are_parse_drift(
+        self,
+    ) -> None:
+        from src.marketplaces.sources.apify import ApifySource
+
+        class DatasetClient:
+            def __init__(self, dataset: list[dict[str, object]]) -> None:
+                self._dataset = dataset
+
+            def is_enabled(
+                self,
+                marketplace: str,
+                operation: MarketplaceOperation,
+            ) -> bool:
+                return True
+
+            async def run_actor(
+                self,
+                marketplace: str,
+                operation: MarketplaceOperation,
+                request: object,
+            ) -> list[dict[str, object]]:
+                return self._dataset
+
+        malformed_values = (
+            ('infinite_rating', {'rating': float('inf')}),
+            ('overflow_rating', {'rating': 10 ** 10_000}),
+            ('infinite_price', {'price': float('inf')}),
+        )
+        for name, override in malformed_values:
+            with self.subTest(name=name):
+                payload = [dict(_PRODUCT, **override)]
+                source = ApifySource('ozon', DatasetClient(payload))
+                result = await source.search_products(
+                    SearchRequest(query='synthetic', limit=2),
+                )
+
+                self.assertEqual(SourceOutcome.PARSE_DRIFT, result.outcome)
+                self.assertEqual(
+                    SafeErrorCode.PARSE_DRIFT,
+                    result.attempt.error_code,
+                )
+
 
 if __name__ == '__main__':
     unittest.main()
