@@ -65,9 +65,13 @@ class FrameCheckbox:
 class OwnedFrame:
     def __init__(self, page: FrameOwnedPage, url: str) -> None:
         self.owner = page
-        self.url = url
+        self._url = url
         self.checkbox = FrameCheckbox(page)
         self.selectors: list[str] = []
+
+    @property
+    def url(self) -> str:
+        return self._url
 
     def locator(self, selector: str) -> FrameCheckbox:
         self.selectors.append(selector)
@@ -114,7 +118,7 @@ class IframeElementLocator:
     ) -> str | None:
         self._page.attribute_timeouts.append(timeout)
         if name == 'src':
-            return self._frame.url
+            return self._page.declared_src
         return None
 
 
@@ -122,9 +126,13 @@ class FrameOwnedPage(FakePage):
     def __init__(self, html: str, frame_url: str) -> None:
         super().__init__(html)
         self.frame = OwnedFrame(self, frame_url)
-        self.frames = (self.frame,)
+        self._frames = (self.frame,)
         self.main_frame_clicks = 0
         self.evaluate_calls = 0
+
+    @property
+    def frames(self) -> tuple[OwnedFrame, ...]:
+        return self._frames
 
     def locator(self, selector: str) -> MainFrameLocator:
         return MainFrameLocator(self)
@@ -134,13 +142,69 @@ class FrameOwnedPage(FakePage):
 
 
 class TitleOwnedPage(FrameOwnedPage):
-    def __init__(self, html: str, frame_url: str) -> None:
+    def __init__(
+        self,
+        html: str,
+        frame_url: str,
+        *,
+        declared_src: str | None = None,
+        expose_frame: bool = False,
+    ) -> None:
         super().__init__(html, frame_url)
-        self.frames = ()
+        self.declared_src = declared_src or frame_url
+        self._frames = (self.frame,) if expose_frame else ()
         self.attribute_timeouts: list[float] = []
 
     def locator(self, selector: str) -> IframeElementLocator:
         return IframeElementLocator(self, self.frame)
+
+
+class LateFramePage(TitleOwnedPage):
+    def __init__(
+        self,
+        html: str,
+        frame_url: str,
+        *,
+        available_after_read: int,
+    ) -> None:
+        super().__init__(html, frame_url)
+        self.available_after_read = available_after_read
+        self.frame_reads = 0
+
+    @property
+    def frames(self) -> tuple[OwnedFrame, ...]:
+        self.frame_reads += 1
+        if self.frame_reads >= self.available_after_read:
+            return (self.frame,)
+        return ()
+
+
+class UrlChangingFrame(OwnedFrame):
+    def __init__(
+        self,
+        page: FrameOwnedPage,
+        urls: tuple[str, ...],
+    ) -> None:
+        super().__init__(page, urls[-1])
+        self._urls = urls
+        self.url_reads = 0
+
+    @property
+    def url(self) -> str:
+        index = min(self.url_reads, len(self._urls) - 1)
+        self.url_reads += 1
+        return self._urls[index]
+
+
+class UrlChangingFramePage(FrameOwnedPage):
+    def __init__(
+        self,
+        html: str,
+        frame_urls: tuple[str, ...],
+    ) -> None:
+        super().__init__(html, frame_urls[0])
+        self.frame = UrlChangingFrame(self, frame_urls)
+        self._frames = (self.frame,)
 
 
 class MissingCheckbox(FrameCheckbox):
@@ -159,6 +223,7 @@ class MissingFramePage(TitleOwnedPage):
     def __init__(self, html: str, frame_url: str) -> None:
         super().__init__(html, frame_url)
         self.frame = MissingFrame(self, frame_url)
+        self._frames = (self.frame,)
 
 
 class DelayedChallengePage(FakePage):
@@ -313,72 +378,113 @@ class ChallengeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(0, page.evaluate_calls)
                 self.assertIs(ChallengeResolution.SOLVED, resolution)
 
-    async def test_title_locator_stays_inside_owned_iframe(self) -> None:
-        page = TitleOwnedPage(
+    async def test_polls_until_actual_provider_frame_is_available(
+        self,
+    ) -> None:
+        page = LateFramePage(
             '<iframe title="reCAPTCHA" '
             'src="https://www.google.com/recaptcha/api2/anchor">'
             '</iframe>',
             'https://www.google.com/recaptcha/api2/anchor',
+            available_after_read=3,
         )
         handler = OhMyCaptchaHandler(
             OhMyCaptchaAdapter(vendor_root=VENDOR_ROOT)
         )
-        coordinator = ChallengeCoordinator((handler,), clock=lambda: 0.0)
+        coordinator = ChallengeCoordinator((handler,))
 
         resolution = await coordinator.resolve(
             page,
-            deadline=FakeDeadline(5.0),
+            deadline=FakeDeadline(time.monotonic() + 0.2),
         )
 
         self.assertEqual(1, len(page.frame.checkbox.click_timeouts))
-        self.assertEqual(1, len(page.attribute_timeouts))
+        self.assertGreaterEqual(page.frame_reads, 3)
+        self.assertEqual([], page.attribute_timeouts)
         self.assertEqual(0, page.main_frame_clicks)
         self.assertIs(ChallengeResolution.SOLVED, resolution)
 
     async def test_title_does_not_authorize_untrusted_frame(self) -> None:
-        untrusted_urls = (
-            'https://evil.invalid/turnstile/widget',
+        trusted_src = (
+            'https://challenges.cloudflare.com/turnstile/v0/widget'
+        )
+        untrusted_frames = (
+            (trusted_src, 'https://evil.invalid/turnstile/widget'),
+            (
+                'https://evil.invalid/turnstile/widget',
+                'https://evil.invalid/turnstile/widget',
+            ),
             (
                 'https://challenges.cloudflare.com/account'
-                '?next=/turnstile/widget'
+                '?next=/turnstile/widget',
+                'https://challenges.cloudflare.com/account'
+                '?next=/turnstile/widget',
             ),
-            'http://challenges.cloudflare.com/turnstile/v0/widget',
+            (
+                'http://challenges.cloudflare.com/turnstile/v0/widget',
+                'http://challenges.cloudflare.com/turnstile/v0/widget',
+            ),
         )
         handler = OhMyCaptchaHandler(
             OhMyCaptchaAdapter(vendor_root=VENDOR_ROOT)
         )
 
-        for frame_url in untrusted_urls:
+        for declared_src, frame_url in untrusted_frames:
             with self.subTest(frame_url=frame_url):
                 page = TitleOwnedPage(
                     '<iframe title="Widget containing a Cloudflare '
-                    'security challenge" src="fixture"></iframe>',
+                    f'security challenge" src="{declared_src}"></iframe>',
                     frame_url,
+                    declared_src=declared_src,
+                    expose_frame=True,
                 )
-                coordinator = ChallengeCoordinator(
-                    (handler,),
-                    clock=lambda: 0.0,
-                )
+                coordinator = ChallengeCoordinator((handler,))
 
                 with self.assertLogs(
                     'src.captcha.coordinator',
                     level='WARNING',
-                ) as logs:
+                ):
                     resolution = await coordinator.resolve(
                         page,
-                        deadline=FakeDeadline(5.0),
+                        deadline=FakeDeadline(time.monotonic() + 0.03),
                     )
 
                 self.assertEqual([], page.frame.checkbox.click_timeouts)
-                self.assertEqual(1, len(page.attribute_timeouts))
-                self.assertIn(
-                    'challenge_handler_failed',
-                    '\n'.join(logs.output),
-                )
+                self.assertEqual([], page.attribute_timeouts)
                 self.assertIs(
                     ChallengeResolution.CHALLENGE_UNSOLVABLE,
                     resolution,
                 )
+
+    async def test_revalidates_current_frame_url_before_click(self) -> None:
+        page = UrlChangingFramePage(
+            '<iframe src="https://challenges.cloudflare.com/'
+            'turnstile/v0/widget"></iframe>',
+            (
+                'https://challenges.cloudflare.com/turnstile/v0/widget',
+                'https://evil.invalid/turnstile/widget',
+            ),
+        )
+        handler = OhMyCaptchaHandler(
+            OhMyCaptchaAdapter(vendor_root=VENDOR_ROOT)
+        )
+        coordinator = ChallengeCoordinator((handler,))
+
+        with self.assertLogs(
+            'src.captcha.coordinator',
+            level='WARNING',
+        ):
+            resolution = await coordinator.resolve(
+                page,
+                deadline=FakeDeadline(time.monotonic() + 0.05),
+            )
+
+        self.assertGreaterEqual(page.frame.url_reads, 2)
+        self.assertEqual([], page.frame.checkbox.click_timeouts)
+        self.assertIs(
+            ChallengeResolution.CHALLENGE_UNSOLVABLE,
+            resolution,
+        )
 
     async def test_unavailable_iframe_checkbox_is_not_a_silent_noop(
         self,

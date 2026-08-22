@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import math
 from typing import Protocol
 from urllib.parse import urlsplit
 
-from src.browser.contracts import FrameLike, FrameLocatorLike, PageLike
+from src.browser.contracts import FrameLike, PageLike
 from src.captcha.models import ChallengeDetection, ChallengeType
 from src.captcha.ohmycaptcha_adapter import OhMyCaptchaAdapter
 
@@ -48,17 +50,6 @@ _FRAME_HOSTS = {
     ChallengeType.TURNSTILE: ('challenges.cloudflare.com',),
 }
 
-_FRAME_TITLE_SELECTORS = {
-    ChallengeType.RECAPTCHA_V2: 'iframe[title="reCAPTCHA"]',
-    ChallengeType.HCAPTCHA: (
-        'iframe[title="Widget containing checkbox for '
-        'hCaptcha security challenge"]'
-    ),
-    ChallengeType.TURNSTILE: (
-        'iframe[title="Widget containing a Cloudflare security challenge"]'
-    ),
-}
-
 _CHECKBOX_SELECTORS = {
     ChallengeType.RECAPTCHA_V2: '#recaptcha-anchor',
     ChallengeType.HCAPTCHA: '#checkbox',
@@ -67,6 +58,8 @@ _CHECKBOX_SELECTORS = {
         '.ctp-checkbox-label'
     ),
 }
+
+_FRAME_POLL_INTERVAL_SEC = 0.01
 
 
 class OhMyCaptchaHandler:
@@ -123,25 +116,45 @@ async def _click_provider_checkbox(
     challenge_type: ChallengeType,
     timeout_ms: float,
 ) -> None:
-    frame = next(
-        (
-            candidate
-            for candidate in page.frames
-            if _matches_provider_frame(candidate, challenge_type)
-        ),
-        None,
+    if not math.isfinite(timeout_ms) or timeout_ms <= 0:
+        raise RuntimeError('provider frame deadline is unavailable')
+    loop = asyncio.get_running_loop()
+    expires_at = loop.time() + (timeout_ms / 1000)
+    frame = await _wait_for_provider_frame(
+        page,
+        challenge_type,
+        expires_at,
     )
-    owner: FrameLike | FrameLocatorLike
-    if frame is not None:
-        owner = frame
-    else:
-        iframe = page.locator(_FRAME_TITLE_SELECTORS[challenge_type])
-        source = await iframe.get_attribute('src', timeout=timeout_ms)
-        if not _matches_provider_url(source, challenge_type):
+    if not _matches_provider_frame(frame, challenge_type):
+        raise RuntimeError('provider frame ownership is unavailable')
+    remaining_ms = (expires_at - loop.time()) * 1000
+    if remaining_ms <= 0:
+        raise RuntimeError('provider frame deadline is unavailable')
+    checkbox = frame.locator(_CHECKBOX_SELECTORS[challenge_type])
+    await checkbox.click(timeout=remaining_ms)
+
+
+async def _wait_for_provider_frame(
+    page: PageLike,
+    challenge_type: ChallengeType,
+    expires_at: float,
+) -> FrameLike:
+    loop = asyncio.get_running_loop()
+    while True:
+        frame = next(
+            (
+                candidate
+                for candidate in page.frames
+                if _matches_provider_frame(candidate, challenge_type)
+            ),
+            None,
+        )
+        if frame is not None:
+            return frame
+        remaining = expires_at - loop.time()
+        if remaining <= 0:
             raise RuntimeError('provider frame ownership is unavailable')
-        owner = iframe.content_frame
-    checkbox = owner.locator(_CHECKBOX_SELECTORS[challenge_type])
-    await checkbox.click(timeout=timeout_ms)
+        await asyncio.sleep(min(_FRAME_POLL_INTERVAL_SEC, remaining))
 
 
 def _matches_provider_frame(

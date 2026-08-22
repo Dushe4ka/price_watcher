@@ -10,32 +10,10 @@ EventHandler = Callable[[Any], Awaitable[None] | None]
 
 
 class LocatorLike(Protocol):
-    """Locator surface for elements selected from a Page or Frame."""
-
-    @property
-    def content_frame(self) -> FrameLocatorLike:
-        """Return the locator boundary for an iframe's content."""
-
-    def locator(self, selector: str) -> LocatorLike:
-        """Create a descendant locator for a code-owned selector."""
-
-    async def get_attribute(
-        self,
-        name: str,
-        *,
-        timeout: float,
-    ) -> str | None:
-        """Read one iframe attribute within a bounded timeout."""
+    """Locator surface for an element selected from an owned Frame."""
 
     async def click(self, *, timeout: float) -> None:
         """Click the target within a bounded Playwright timeout."""
-
-
-class FrameLocatorLike(Protocol):
-    """Locator boundary for elements inside one selected iframe."""
-
-    def locator(self, selector: str) -> LocatorLike:
-        """Create a locator inside the selected iframe."""
 
 
 class FrameLike(Protocol):
@@ -89,9 +67,6 @@ class PageLike(Protocol):
 
     async def content(self) -> str:
         """Return serialized page HTML."""
-
-    def locator(self, selector: str) -> LocatorLike:
-        """Create a main-document locator for a code-owned selector."""
 
     async def evaluate(self, expression: str) -> Any:
         """Evaluate JavaScript in the page."""
