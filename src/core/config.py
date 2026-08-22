@@ -12,6 +12,10 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from src.captcha.smartcaptcha import (
+    SmartCaptchaMode,
+    is_valid_widget_id,
+)
 from src.marketplaces.contracts import (
     MarketplaceName,
     MarketplaceOperation,
@@ -27,7 +31,6 @@ STATIC_DIR = '/media'
 
 RuntimeRole = Literal['local', 'api', 'bot']
 CaptchaAdapterMode = Literal['disabled', 'ohmycaptcha']
-SmartCaptchaMode = Literal['disabled', 'frictionless']
 
 _RUNTIME_ROLES = frozenset(('local', 'api', 'bot'))
 _MARKETPLACES = frozenset(('wildberries', 'ozon', 'yandex_market'))
@@ -142,6 +145,7 @@ class Settings(BaseSettings):
     ohmycaptcha_api_key: SecretStr = SecretStr('')
     smartcaptcha_mode: SmartCaptchaMode = 'disabled'
     smartcaptcha_client_key: SecretStr = SecretStr('')
+    smartcaptcha_widget_id: str = ''
     marketplace_total_timeout_sec: int = Field(default=30, gt=0, le=300)
     marketplace_max_content_bytes: int = Field(
         default=2_000_000,
@@ -177,6 +181,14 @@ class Settings(BaseSettings):
             raise ValueError(
                 'marketplace retry max delay must not be less than base delay'
             )
+        return value
+
+    @field_validator('smartcaptcha_widget_id')
+    @classmethod
+    def validate_smartcaptcha_widget_id(cls, value: str) -> str:
+        """Accept only an unset or explicitly trusted public widget ID."""
+        if value and not is_valid_widget_id(value):
+            raise ValueError('invalid SmartCaptcha widget ID')
         return value
 
     @property

@@ -12,7 +12,11 @@ from typing import Any, Protocol, TypeVar
 from src.browser.contracts import PageLike
 from src.captcha.detector import detect_challenge
 from src.captcha.handlers import ChallengeHandler
-from src.captcha.models import ChallengeResolution, ChallengeType
+from src.captcha.models import (
+    ChallengeDetection,
+    ChallengeResolution,
+    ChallengeType,
+)
 
 
 log = logging.getLogger(__name__)
@@ -28,6 +32,18 @@ class DeadlineLike(Protocol):
     expires_at: float
 
 
+class SmartCaptchaResolver(Protocol):
+    """Optional resolver for an explicitly configured unknown challenge."""
+
+    async def solve(
+        self,
+        page: PageLike,
+        detection: ChallengeDetection,
+        deadline: DeadlineLike,
+    ) -> ChallengeResolution:
+        """Resolve only a trusted existing SmartCaptcha widget."""
+
+
 class ChallengeCoordinator:
     """Attempt a safe handler and trust only a clean re-detection."""
 
@@ -37,6 +53,7 @@ class ChallengeCoordinator:
         '_handlers',
         '_poll_interval_sec',
         '_sleep',
+        '_smartcaptcha_handler',
     )
 
     def __init__(
@@ -45,6 +62,7 @@ class ChallengeCoordinator:
         clock: Clock = time.monotonic,
         sleep: Sleep = asyncio.sleep,
         poll_interval_sec: float = 0.01,
+        smartcaptcha_handler: SmartCaptchaResolver | None = None,
     ) -> None:
         if not math.isfinite(poll_interval_sec) or poll_interval_sec <= 0:
             raise ValueError('poll_interval_sec must be finite and positive')
@@ -52,6 +70,7 @@ class ChallengeCoordinator:
         self._clock = clock
         self._sleep = sleep
         self._poll_interval_sec = poll_interval_sec
+        self._smartcaptcha_handler = smartcaptcha_handler
         self._background_tasks: set[asyncio.Future[Any]] = set()
 
     async def resolve(
@@ -76,10 +95,19 @@ class ChallengeCoordinator:
 
         if detection.challenge_type is ChallengeType.NONE:
             return ChallengeResolution.NO_CHALLENGE
-        if (
-            detection.challenge_type is ChallengeType.UNKNOWN
-            or detection.is_interactive
-        ):
+        if detection.challenge_type is ChallengeType.UNKNOWN:
+            if self._smartcaptcha_handler is None:
+                return ChallengeResolution.CHALLENGE_UNSOLVABLE
+            try:
+                return await self._smartcaptcha_handler.solve(
+                    page,
+                    detection,
+                    deadline,
+                )
+            except Exception:
+                self._log_failure('challenge_handler_failed')
+                return ChallengeResolution.CHALLENGE_UNSOLVABLE
+        if detection.is_interactive:
             return ChallengeResolution.CHALLENGE_UNSOLVABLE
 
         try:

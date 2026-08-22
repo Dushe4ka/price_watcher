@@ -9,6 +9,7 @@ from src.captcha.models import (
     ChallengeType,
 )
 from src.captcha.ohmycaptcha_adapter import OhMyCaptchaAdapter
+from src.captcha.smartcaptcha import SmartCaptchaHandler, SmartCaptchaMode
 
 
 __all__ = (
@@ -19,5 +20,7 @@ __all__ = (
     'ChallengeType',
     'OhMyCaptchaAdapter',
     'OhMyCaptchaHandler',
+    'SmartCaptchaHandler',
+    'SmartCaptchaMode',
     'detect_challenge',
 )
