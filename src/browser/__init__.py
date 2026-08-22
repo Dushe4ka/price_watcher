@@ -7,10 +7,15 @@ from src.browser.allowlist import (
     validate_main_frame_url,
 )
 from src.browser.contracts import BrowserContextLike, PageLike
-from src.browser.profiles import BrowserSessionManager, ProfileLock
+from src.browser.profiles import (
+    BrowserSessionCloseError,
+    BrowserSessionManager,
+    ProfileLock,
+)
 
 __all__ = [
     'BrowserContextLike',
+    'BrowserSessionCloseError',
     'BrowserSessionManager',
     'CategoryUrlResolutionRequired',
     'PageLike',

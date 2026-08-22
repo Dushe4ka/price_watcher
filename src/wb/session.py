@@ -48,6 +48,8 @@ class WBBrowserSession:
         self._playwright: Playwright | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
+        self._context_closed = True
+        self._playwright_stopped = True
         self._profile_dir = profile_dir or settings.profile_dir(
             settings.runtime_role,
             'wildberries',
@@ -148,6 +150,12 @@ class WBBrowserSession:
         )
 
     async def _ensure_context_inner(self) -> BrowserContext:
+        if self._profile_lock is not None and (
+            self._context is None
+            or self._context_closed
+            or self._playwright_stopped
+        ):
+            await self._close_inner()
         if self._context is None:
             await self._start_fresh()
         assert self._context is not None
@@ -170,6 +178,7 @@ class WBBrowserSession:
         self._profile_lock.acquire()
         try:
             self._playwright = await self._playwright_factory().start()
+            self._playwright_stopped = False
             launch_kwargs: dict[str, Any] = {
                 'user_data_dir': str(self._profile_dir),
                 'headless': False,
@@ -191,6 +200,7 @@ class WBBrowserSession:
                     **launch_kwargs,
                 )
             )
+            self._context_closed = False
             await self._context.add_init_script(STEALTH_INIT_SCRIPT)
             await _close_startup_pages(self._context)
             self.touch()
@@ -238,20 +248,29 @@ class WBBrowserSession:
         context = self._context
         playwright = self._playwright
         profile_lock = self._profile_lock
+        errors: list[BaseException] = []
+        if context is not None and not self._context_closed:
+            try:
+                await context.close()
+            except BaseException as exc:
+                errors.append(exc)
+            else:
+                self._context_closed = True
+        if playwright is not None and not self._playwright_stopped:
+            try:
+                await playwright.stop()
+            except BaseException as exc:
+                errors.append(exc)
+            else:
+                self._playwright_stopped = True
+        if errors:
+            raise errors[0]
         self._page = None
         self._context = None
         self._playwright = None
         self._profile_lock = None
-        try:
-            if context is not None:
-                await context.close()
-        finally:
-            try:
-                if playwright is not None:
-                    await playwright.stop()
-            finally:
-                if profile_lock is not None:
-                    profile_lock.release()
+        if profile_lock is not None:
+            profile_lock.release()
 
 
 async def _close_startup_pages(context: BrowserContext) -> None:

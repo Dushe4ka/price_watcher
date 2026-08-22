@@ -131,18 +131,15 @@ browser-profiles/
 .browser-profiles/
 .wb-profile/
 .yandex-market-profile/
-**/.profile.lock
-**/SingletonLock
-**/SingletonCookie
-**/SingletonSocket
-**/Local State
-**/Default/Cookies
-**/Default/History
-**/Default/Login Data
-**/Default/Network Persistent State
-**/Default/Preferences
-**/Default/Secure Preferences
-**/Default/Web Data
+**/local/wildberries/**
+**/local/ozon/**
+**/local/yandex_market/**
+**/api/wildberries/**
+**/api/ozon/**
+**/api/yandex_market/**
+**/bot/wildberries/**
+**/bot/ozon/**
+**/bot/yandex_market/**
 
 # Environments
 .env

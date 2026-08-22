@@ -12,6 +12,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts.repository_hygiene import (
+    _dockerignore_rules,
+    _is_dockerignore_excluded,
+)
+
 
 class RepositoryHygieneCommandTests(unittest.TestCase):
     def test_reports_tracked_secret_and_generated_artifacts(self) -> None:
@@ -56,6 +61,29 @@ class RepositoryHygieneCommandTests(unittest.TestCase):
                 repository,
                 'custom-root/bot/yandex_market/Default/History',
                 '',
+            )
+            write_file(
+                repository,
+                'custom-root/api/ozon/Default/Cookies-journal',
+                '',
+            )
+            write_file(
+                repository,
+                'custom-root/api/ozon/Default/Cookies-wal',
+                '',
+            )
+            write_file(
+                repository,
+                (
+                    'custom-root/local/yandex_market/Default/'
+                    'Session Storage/state.log'
+                ),
+                '',
+            )
+            write_file(
+                repository,
+                'custom-root/bot/wildberries/session/state.json',
+                '{}\n',
             )
             write_file(repository, 'graphify-out/graph.json', '{}\n')
             track_all(repository)
@@ -109,6 +137,20 @@ class RepositoryHygieneCommandTests(unittest.TestCase):
             ),
             violations,
         )
+        for path in (
+            'custom-root/api/ozon/Default/Cookies-journal',
+            'custom-root/api/ozon/Default/Cookies-wal',
+            (
+                'custom-root/local/yandex_market/Default/'
+                'Session Storage/state.log'
+            ),
+            'custom-root/bot/wildberries/session/state.json',
+        ):
+            with self.subTest(path=path):
+                self.assertIn(
+                    ('tracked_runtime_profile', path),
+                    violations,
+                )
         self.assertIn(
             ('tracked_graph_artifact', 'graphify-out/graph.json'),
             violations,
@@ -180,6 +222,59 @@ class RepositoryHygieneCommandTests(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual({'violations': []}, json.loads(result.stdout))
+
+    def test_unrelated_document_names_are_not_profile_artifacts(self) -> None:
+        with temporary_repository() as repository:
+            write_file(repository, 'docs/Default/History', 'documentation\n')
+            write_file(repository, 'docs/Local State', 'documentation\n')
+            write_file(repository, 'docs/Cookies-journal', 'documentation\n')
+            track_all(repository)
+
+            result, report = run_guard(repository)
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([], report['violations'])
+
+    def test_profile_shapes_are_ignored_without_hiding_documents(self) -> None:
+        repository_root = Path(__file__).parents[1]
+        profile_paths = (
+            'custom/api/ozon/Default/Cookies-wal',
+            'custom/bot/wildberries/Default/History-journal',
+            (
+                'custom/local/yandex_market/Default/'
+                'Local Storage/state.log'
+            ),
+            'custom/api/ozon/SingletonLock',
+        )
+        document_paths = (
+            'docs/Default/History',
+            'docs/Local State',
+            'docs/Cookies-journal',
+        )
+        docker_rules = _dockerignore_rules(repository_root / '.dockerignore')
+
+        for path in profile_paths:
+            with self.subTest(path=path):
+                result = subprocess.run(
+                    ['git', 'check-ignore', '--no-index', '--quiet', path],
+                    cwd=repository_root,
+                    check=False,
+                )
+                self.assertEqual(0, result.returncode)
+                self.assertTrue(
+                    _is_dockerignore_excluded(path, docker_rules),
+                )
+        for path in document_paths:
+            with self.subTest(path=path):
+                result = subprocess.run(
+                    ['git', 'check-ignore', '--no-index', '--quiet', path],
+                    cwd=repository_root,
+                    check=False,
+                )
+                self.assertEqual(1, result.returncode)
+                self.assertFalse(
+                    _is_dockerignore_excluded(path, docker_rules),
+                )
 
 
 class TemporaryRepository:

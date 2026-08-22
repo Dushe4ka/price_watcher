@@ -42,25 +42,9 @@ RUNTIME_PROFILE_DIRECTORIES = frozenset(
     }
 )
 GRAPH_ARTIFACT_DIRECTORIES = frozenset({'graphify-out'})
-BROWSER_PROFILE_MARKER_FILES = frozenset(
-    {
-        'Cookies',
-        'History',
-        'Login Data',
-        'Network Persistent State',
-        'Preferences',
-        'Secure Preferences',
-        'Web Data',
-    }
-)
-BROWSER_PROFILE_ROOT_FILES = frozenset(
-    {
-        '.profile.lock',
-        'Local State',
-        'SingletonCookie',
-        'SingletonLock',
-        'SingletonSocket',
-    }
+BROWSER_PROFILE_ROLES = frozenset({'local', 'api', 'bot'})
+BROWSER_PROFILE_MARKETPLACES = frozenset(
+    {'wildberries', 'ozon', 'yandex_market'}
 )
 ENVIRONMENT_VARIANT_PATTERNS = frozenset(
     {'.env.*', '.env*', '**/.env.*', '**/.env*'}
@@ -340,15 +324,11 @@ def _contains_directory(
 
 
 def _is_browser_profile_artifact(path: PurePosixPath) -> bool:
-    if path.name in BROWSER_PROFILE_ROOT_FILES:
-        return True
-    profile_directories = {
-        part
-        for part in path.parts[:-1]
-        if part == 'Default' or part.startswith('Profile ')
-    }
-    return bool(profile_directories) and (
-        path.name in BROWSER_PROFILE_MARKER_FILES
+    parts = path.parts
+    return any(
+        parts[index] in BROWSER_PROFILE_ROLES
+        and parts[index + 1] in BROWSER_PROFILE_MARKETPLACES
+        for index in range(len(parts) - 2)
     )
 
 

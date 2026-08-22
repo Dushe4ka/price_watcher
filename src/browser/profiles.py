@@ -26,6 +26,10 @@ class BrowserProcessIsolationError(RuntimeError):
     """The process worker count cannot safely own browser profiles."""
 
 
+class BrowserSessionCloseError(RuntimeError):
+    """One or more persistent browser sessions could not close safely."""
+
+
 class ProfileLock:
     """Own a non-blocking OS lock for one persistent profile lifetime."""
 
@@ -76,8 +80,6 @@ def validate_single_browser_worker(
     """Require one web worker before a persistent browser can start."""
     values = os.environ if environment is None else environment
     concurrency = values.get('WEB_CONCURRENCY')
-    if concurrency is None:
-        return
     if concurrency != '1':
         raise BrowserProcessIsolationError(
             'persistent browsers require WEB_CONCURRENCY=1',
@@ -116,6 +118,16 @@ class BrowserSessionManager:
             for marketplace in self._sessions
         }
         self._closed = False
+        self._closing = False
+        self._closed_sessions: set[MarketplaceName] = set()
+        self._close_state_lock = asyncio.Lock()
+        self._close_task: asyncio.Task[None] | None = None
+
+    async def start(self) -> None:
+        """Validate process isolation at application lifecycle startup."""
+        if self._closed or self._closing:
+            raise RuntimeError('browser session manager is closed or closing')
+        validate_single_browser_worker()
 
     @asynccontextmanager
     async def lease(
@@ -123,55 +135,151 @@ class BrowserSessionManager:
         marketplace: MarketplaceName,
     ) -> AsyncIterator[PageLike]:
         """Yield one guarded task page for the whole marketplace operation."""
-        if self._closed:
-            raise RuntimeError('browser session manager is closed')
+        if self._closed or self._closing:
+            raise RuntimeError('browser session manager is closed or closing')
         try:
             session = self._sessions[marketplace]
             operation_lock = self._locks[marketplace]
         except KeyError as exc:
             raise ValueError('unsupported marketplace') from exc
         async with operation_lock:
+            if self._closed or self._closing:
+                raise RuntimeError(
+                    'browser session manager is closed or closing',
+                )
             validate_single_browser_worker()
             await session.close_if_idle()
             context = await session.ensure_context()
             page = await context.new_page()
-            _guard_task_page(page, marketplace)
+            page_guard = _LeasePageGuard(page, marketplace)
+            body_failed = False
             try:
                 yield page
+            except BaseException:
+                body_failed = True
+                raise
             finally:
+                close_error: BaseException | None = None
                 try:
                     if not page.is_closed():
                         await page.close()
+                except BaseException as exc:
+                    close_error = exc
                 finally:
-                    session.touch()
+                    try:
+                        await page_guard.drain()
+                    finally:
+                        session.touch()
+                if not body_failed:
+                    if page_guard.unsafe_redirect is not None:
+                        raise page_guard.unsafe_redirect
+                    if close_error is not None:
+                        raise close_error
 
     async def close(self) -> None:
-        """Close all contexts after any active marketplace leases finish."""
-        if self._closed:
-            return
+        """Close every session once and share cleanup across callers."""
+        async with self._close_state_lock:
+            if self._closed:
+                return
+            self._closing = True
+            if self._close_task is None:
+                self._close_task = asyncio.create_task(
+                    self._close_unresolved_sessions(),
+                )
+            close_task = self._close_task
+        try:
+            await asyncio.shield(close_task)
+        finally:
+            if close_task.done():
+                async with self._close_state_lock:
+                    if self._close_task is close_task:
+                        self._close_task = None
+
+    async def _close_unresolved_sessions(self) -> None:
+        unresolved = tuple(
+            (marketplace, session)
+            for marketplace, session in self._sessions.items()
+            if marketplace not in self._closed_sessions
+        )
+        results = await asyncio.gather(
+            *(
+                self._close_session(marketplace, session)
+                for marketplace, session in unresolved
+            ),
+            return_exceptions=True,
+        )
+        failed = False
+        for (marketplace, _), result in zip(unresolved, results):
+            if isinstance(result, BaseException):
+                failed = True
+            else:
+                self._closed_sessions.add(marketplace)
+        if failed:
+            raise BrowserSessionCloseError(
+                'one or more browser sessions could not close safely',
+            ) from None
         self._closed = True
-        for marketplace, session in self._sessions.items():
-            async with self._locks[marketplace]:
-                await session.close()
+
+    async def _close_session(
+        self,
+        marketplace: MarketplaceName,
+        session: PersistentBrowserSession,
+    ) -> None:
+        async with self._locks[marketplace]:
+            await session.close()
 
 
-def _guard_task_page(page: PageLike, marketplace: MarketplaceName) -> None:
-    async def close_popup(popup: PageLike) -> None:
-        if not popup.is_closed():
-            await popup.close()
+class _LeasePageGuard:
+    """Track event cleanup so a lease cannot outlive browser side effects."""
 
-    async def validate_redirect(frame: object) -> None:
-        if frame is not page.main_frame:
+    def __init__(
+        self,
+        page: PageLike,
+        marketplace: MarketplaceName,
+    ) -> None:
+        self._page = page
+        self._marketplace = marketplace
+        self._tasks: set[asyncio.Task[None]] = set()
+        self.unsafe_redirect: UnsafeMarketplaceUrl | None = None
+        page.on('popup', self._close_popup)
+        page.on('framenavigated', self._validate_redirect)
+
+    def _close_popup(self, popup: PageLike) -> None:
+        self._schedule_close(popup)
+
+    def _validate_redirect(self, frame: object) -> None:
+        if frame is not self._page.main_frame:
             return
         url = getattr(frame, 'url', '')
         try:
-            validate_main_frame_url(marketplace, url)
-        except UnsafeMarketplaceUrl:
-            if not page.is_closed():
-                await page.close()
+            validate_main_frame_url(self._marketplace, url)
+        except UnsafeMarketplaceUrl as exc:
+            self.unsafe_redirect = exc
+            self._schedule_close(self._page)
 
-    page.on('popup', close_popup)
-    page.on('framenavigated', validate_redirect)
+    def _schedule_close(self, page: PageLike) -> None:
+        task = asyncio.create_task(_close_page(page))
+        self._tasks.add(task)
+        task.add_done_callback(_consume_task_exception)
+
+    async def drain(self) -> None:
+        """Wait for every event cleanup scheduled during this lease."""
+        while self._tasks:
+            tasks = tuple(self._tasks)
+            self._tasks.difference_update(tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _close_page(page: PageLike) -> None:
+    if not page.is_closed():
+        await page.close()
+
+
+def _consume_task_exception(task: asyncio.Task[None]) -> None:
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        pass
 
 
 def _default_sessions() -> dict[

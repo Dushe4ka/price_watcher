@@ -67,15 +67,17 @@ class ProfileLockTests(unittest.TestCase):
         self.assertEqual(0, process.exitcode)
 
     def test_web_concurrency_must_be_exactly_one(self) -> None:
-        validate_single_browser_worker({})
         validate_single_browser_worker({'WEB_CONCURRENCY': '1'})
 
-        for value in ('0', '2', 'invalid'):
+        for value in (None, '0', '2', 'invalid'):
             with self.subTest(value=value):
+                environment = (
+                    {}
+                    if value is None
+                    else {'WEB_CONCURRENCY': value}
+                )
                 with self.assertRaises(BrowserProcessIsolationError):
-                    validate_single_browser_worker(
-                        {'WEB_CONCURRENCY': value},
-                    )
+                    validate_single_browser_worker(environment)
 
     def test_environment_mapping_is_read_without_mutation(self) -> None:
         environment = {'WEB_CONCURRENCY': '1'}
