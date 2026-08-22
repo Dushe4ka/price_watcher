@@ -226,6 +226,34 @@ class ChallengeDetectorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(expected_type, detection.challenge_type)
                 self.assertTrue(detection.is_interactive)
 
+    async def test_unknown_challenge_preserves_structural_slider_marker(
+        self,
+    ) -> None:
+        html = (
+            '<div class="smart-captcha">'
+            '<div data-challenge-type="slider"></div>'
+            '</div>'
+        )
+
+        detection = await detect_challenge(FixturePage(html))
+
+        self.assertIs(ChallengeType.UNKNOWN, detection.challenge_type)
+        self.assertTrue(detection.is_interactive)
+
+    async def test_unknown_plain_text_does_not_become_interactive(
+        self,
+    ) -> None:
+        html = (
+            '<div class="smart-captcha">'
+            '<p>Image and slider challenge documentation</p>'
+            '</div>'
+        )
+
+        detection = await detect_challenge(FixturePage(html))
+
+        self.assertIs(ChallengeType.UNKNOWN, detection.challenge_type)
+        self.assertFalse(detection.is_interactive)
+
 
 if __name__ == '__main__':
     unittest.main()

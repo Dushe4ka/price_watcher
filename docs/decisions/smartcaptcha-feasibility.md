@@ -37,6 +37,18 @@ SmartCaptcha по умолчанию отключена. Режим `frictionles
 Интерактивное задание не кликается. На timeout/cancellation страница закрывается,
 чтобы отменённый JavaScript не мог позднее изменить её состояние.
 
+Строгий structural marker (`data-challenge-type=slider`, соответствующий class
+или id) сохраняет `is_interactive` даже для challenge типа `UNKNOWN`. Такой
+challenge coordinator отклоняет до любого JavaScript-вызова. Текстовые слова
+`image`, `slider` или `audio` сами по себе интерактивность не активируют.
+
+Callback lifecycle учитывает синхронные события во время `subscribe`: terminal
+failure прекращает дальнейшие подписки и запрещает `execute`, а возвращённый
+после callback unsubscribe вызывается сразу. Синхронный `success` считается
+предварительным до завершения всех подписок и успешного возврата из `execute`;
+видимый challenge, error, expiration или exception в том же setup-цикле имеет
+fail-closed приоритет.
+
 ## Граница с marketplace-валидацией
 
 Исчезновение challenge доказывает только завершение CAPTCHA-этапа. Оно не

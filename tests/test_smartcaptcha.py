@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+import json
+import os
 from pathlib import Path
+import shutil
 import time
 import unittest
 
@@ -30,6 +33,21 @@ FIXTURE = (
 ).read_text(encoding='utf-8')
 CLEAN_HTML = '<!doctype html><html><body>marketplace content</body></html>'
 TRUSTED_WIDGET_ID = 'market-widget_01'
+
+
+def find_node_executable() -> str | None:
+    """Use system Node or Playwright's pinned bundled runtime."""
+    executable = shutil.which('node')
+    if executable is not None:
+        return executable
+    import playwright
+
+    node_name = 'node.exe' if os.name == 'nt' else 'node'
+    bundled = Path(playwright.__file__).parent / 'driver' / node_name
+    return str(bundled) if bundled.is_file() else None
+
+
+NODE_EXECUTABLE = find_node_executable()
 
 
 @dataclass(frozen=True)
@@ -111,6 +129,64 @@ class FakeSmartCaptchaPage:
     async def close(self) -> None:
         self.close_calls += 1
         self.closed = True
+
+
+class JavaScriptSmartCaptchaPage(FakeSmartCaptchaPage):
+    def __init__(
+        self,
+        *,
+        synchronous_event: str,
+        execute_error: str = '',
+        callback_payload: str = '',
+    ) -> None:
+        super().__init__('success')
+        self.synchronous_event = synchronous_event
+        self.execute_error = execute_error
+        self.callback_payload = callback_payload
+        self.trace: list[str] = []
+
+    async def evaluate(self, expression: str) -> str:
+        self.evaluated.append(expression)
+        program = f"""
+const trace = [];
+const callbacks = new Map();
+const synchronousEvent = {json.dumps(self.synchronous_event)};
+const executeError = {json.dumps(self.execute_error)};
+const callbackPayload = {json.dumps(self.callback_payload)};
+globalThis.window = {{
+    smartCaptcha: {{
+        subscribe(widgetId, event, callback) {{
+            trace.push(`subscribe:${{event}}`);
+            callbacks.set(event, callback);
+            if (event === synchronousEvent) {{
+                callback(callbackPayload);
+            }}
+            return () => trace.push(`unsubscribe:${{event}}`);
+        }},
+        execute(widgetId) {{
+            trace.push('execute');
+            if (executeError) throw new Error(executeError);
+        }},
+    }},
+}};
+const solve = ({expression});
+const status = await solve();
+process.stdout.write(JSON.stringify({{status, trace}}));
+"""
+        process = await asyncio.create_subprocess_exec(
+            NODE_EXECUTABLE,
+            '--input-type=module',
+            '--eval',
+            program,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await process.communicate()
+        if process.returncode != 0:
+            raise RuntimeError('controlled JavaScript runtime failed')
+        result = json.loads(stdout.decode('utf-8'))
+        self.trace = result['trace']
+        return result['status']
 
 
 class SmartCaptchaHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -336,6 +412,108 @@ class SmartCaptchaHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(ChallengeResolution.SOLVED, result)
         self.assertEqual(1, len(page.evaluated))
+
+    async def test_interactive_unknown_never_reaches_smartcaptcha(
+        self,
+    ) -> None:
+        page = FakeSmartCaptchaPage()
+        page.html = (
+            '<div class="smart-captcha">'
+            '<div data-challenge-type="slider"></div>'
+            '</div>'
+        )
+        handler = SmartCaptchaHandler(
+            SmartCaptchaMode.FRICTIONLESS,
+            widget_id=TRUSTED_WIDGET_ID,
+        )
+
+        result = await ChallengeCoordinator(
+            [],
+            smartcaptcha_handler=handler,
+        ).resolve(page, deadline=deadline())
+
+        self.assertIs(ChallengeResolution.CHALLENGE_UNSOLVABLE, result)
+        self.assertEqual([], page.evaluated)
+
+    @unittest.skipUnless(NODE_EXECUTABLE, 'Node.js runtime is unavailable')
+    async def test_synchronous_terminal_callback_cleans_up_and_stops(
+        self,
+    ) -> None:
+        page = JavaScriptSmartCaptchaPage(
+            synchronous_event='challenge-visible',
+        )
+
+        result = await SmartCaptchaHandler(
+            SmartCaptchaMode.FRICTIONLESS,
+            widget_id=TRUSTED_WIDGET_ID,
+        ).solve(page, smartcaptcha_detection(), deadline())
+
+        self.assertIs(ChallengeResolution.CHALLENGE_UNSOLVABLE, result)
+        self.assertEqual(
+            (
+                'subscribe:challenge-visible',
+                'unsubscribe:challenge-visible',
+            ),
+            tuple(page.trace),
+        )
+
+    @unittest.skipUnless(NODE_EXECUTABLE, 'Node.js runtime is unavailable')
+    async def test_synchronous_success_cleans_every_subscription(
+        self,
+    ) -> None:
+        page = JavaScriptSmartCaptchaPage(
+            synchronous_event='success',
+            callback_payload='SENTINEL_CALLBACK_TOKEN',
+        )
+
+        result = await SmartCaptchaHandler(
+            SmartCaptchaMode.FRICTIONLESS,
+            widget_id=TRUSTED_WIDGET_ID,
+        ).solve(page, smartcaptcha_detection(), deadline())
+
+        self.assertIs(ChallengeResolution.SOLVED, result)
+        self.assertEqual(1, page.trace.count('execute'))
+        self.assertEqual(
+            5,
+            sum(item.startswith('subscribe:') for item in page.trace),
+        )
+        self.assertEqual(
+            5,
+            sum(item.startswith('unsubscribe:') for item in page.trace),
+        )
+
+    @unittest.skipUnless(NODE_EXECUTABLE, 'Node.js runtime is unavailable')
+    async def test_execute_failure_overrides_synchronous_success(
+        self,
+    ) -> None:
+        sentinel_token = 'SENTINEL_CALLBACK_TOKEN'
+        sentinel_error = 'SENTINEL_RAW_JAVASCRIPT_ERROR'
+        page = JavaScriptSmartCaptchaPage(
+            synchronous_event='success',
+            execute_error=sentinel_error,
+            callback_payload=sentinel_token,
+        )
+        handler = SmartCaptchaHandler(
+            SmartCaptchaMode.FRICTIONLESS,
+            widget_id=TRUSTED_WIDGET_ID,
+        )
+
+        with self.assertNoLogs(
+            'src.captcha.smartcaptcha',
+            level='DEBUG',
+        ):
+            result = await handler.solve(
+                page,
+                smartcaptcha_detection(),
+                deadline(),
+            )
+
+        rendered = '\n'.join((repr(result), repr(handler)))
+        self.assertIs(ChallengeResolution.CHALLENGE_UNSOLVABLE, result)
+        self.assertNotIn(sentinel_token, rendered)
+        self.assertNotIn(sentinel_error, rendered)
+        self.assertIsNone(getattr(result, '__cause__', None))
+        self.assertIn('execute', page.trace)
 
 
 class SmartCaptchaSettingsTests(unittest.TestCase):

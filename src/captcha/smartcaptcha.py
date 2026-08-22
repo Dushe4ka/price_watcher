@@ -40,6 +40,8 @@ async () => {
     return await new Promise((resolve) => {
         const unsubscribers = [];
         let settled = false;
+        let setupComplete = false;
+        let successObserved = false;
         const finish = (status) => {
             if (settled) return;
             settled = true;
@@ -52,26 +54,57 @@ async () => {
             }
             resolve(status);
         };
-        const subscribe = (event, status) => {
+        const fail = (status) => finish(status);
+        const succeed = () => {
+            if (settled) return;
+            successObserved = true;
+            if (setupComplete) finish('success');
+        };
+        const subscribe = (event, callback) => {
+            if (settled) return false;
             const unsubscribe = api.subscribe(
                 widgetId,
                 event,
-                () => finish(status),
+                callback,
             );
             if (typeof unsubscribe === 'function') {
-                unsubscribers.push(unsubscribe);
+                if (settled) {
+                    try {
+                        unsubscribe();
+                    } catch (_) {
+                        // Listener cleanup must not expose provider errors.
+                    }
+                } else {
+                    unsubscribers.push(unsubscribe);
+                }
             }
+            return !settled;
         };
         try {
-            subscribe('challenge-visible', 'challenge_visible');
-            subscribe('network-error', 'network_error');
-            subscribe('javascript-error', 'javascript_error');
-            subscribe('success', 'success');
-            subscribe('token-expired', 'token_expired');
+            if (!subscribe(
+                'challenge-visible',
+                () => fail('challenge_visible'),
+            )) return;
+            if (!subscribe(
+                'network-error',
+                () => fail('network_error'),
+            )) return;
+            if (!subscribe(
+                'javascript-error',
+                () => fail('javascript_error'),
+            )) return;
+            if (!subscribe('success', () => succeed())) return;
+            if (!subscribe(
+                'token-expired',
+                () => fail('token_expired'),
+            )) return;
             api.execute(widgetId);
         } catch (_) {
-            finish('javascript_error');
+            fail('javascript_error');
+            return;
         }
+        setupComplete = true;
+        if (successObserved) finish('success');
     });
 }
 """

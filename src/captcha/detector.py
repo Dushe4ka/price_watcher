@@ -54,7 +54,10 @@ async def detect_challenge(page: PageLike) -> ChallengeDetection:
                 is_interactive=challenge_type in parser.interactive,
             )
     if parser.unknown:
-        return ChallengeDetection(challenge_type=ChallengeType.UNKNOWN)
+        return ChallengeDetection(
+            challenge_type=ChallengeType.UNKNOWN,
+            is_interactive=parser.unknown_interactive,
+        )
     return ChallengeDetection(challenge_type=ChallengeType.NONE)
 
 
@@ -66,8 +69,9 @@ class _ChallengeMarkupParser(HTMLParser):
         self.active: set[ChallengeType] = set()
         self.interactive: set[ChallengeType] = set()
         self.unknown = False
+        self.unknown_interactive = False
         self._elements: list[
-            tuple[str, frozenset[ChallengeType], bool]
+            tuple[str, frozenset[ChallengeType], bool, bool]
         ] = []
 
     def handle_starttag(
@@ -80,6 +84,9 @@ class _ChallengeMarkupParser(HTMLParser):
             self._elements[-1][1] if self._elements else frozenset()
         )
         inherited_inert = self._elements[-1][2] if self._elements else False
+        inherited_unknown = (
+            self._elements[-1][3] if self._elements else False
+        )
         inert = inherited_inert or normalized_tag in (
             'script',
             'style',
@@ -108,13 +115,26 @@ class _ChallengeMarkupParser(HTMLParser):
             ):
                 self.interactive.update(inherited_providers)
 
-            if _is_unknown_challenge_element(attributes):
+            current_unknown = _is_unknown_challenge_element(attributes)
+            if current_unknown:
                 self.unknown = True
+            if (
+                (current_unknown or inherited_unknown)
+                and _has_interactive_marker(normalized_tag, attributes)
+            ):
+                self.unknown_interactive = True
+        else:
+            current_unknown = False
 
         if normalized_tag not in _VOID_ELEMENTS:
             current_providers = inherited_providers | providers
             self._elements.append(
-                (normalized_tag, frozenset(current_providers), inert)
+                (
+                    normalized_tag,
+                    frozenset(current_providers),
+                    inert,
+                    inherited_unknown or current_unknown,
+                )
             )
 
     def handle_endtag(self, tag: str) -> None:

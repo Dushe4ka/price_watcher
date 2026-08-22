@@ -95,6 +95,8 @@ class ChallengeCoordinator:
 
         if detection.challenge_type is ChallengeType.NONE:
             return ChallengeResolution.NO_CHALLENGE
+        if detection.is_interactive:
+            return ChallengeResolution.CHALLENGE_UNSOLVABLE
         if detection.challenge_type is ChallengeType.UNKNOWN:
             if self._smartcaptcha_handler is None:
                 return ChallengeResolution.CHALLENGE_UNSOLVABLE
@@ -107,9 +109,6 @@ class ChallengeCoordinator:
             except Exception:
                 self._log_failure('challenge_handler_failed')
                 return ChallengeResolution.CHALLENGE_UNSOLVABLE
-        if detection.is_interactive:
-            return ChallengeResolution.CHALLENGE_UNSOLVABLE
-
         try:
             handler = next(
                 candidate
