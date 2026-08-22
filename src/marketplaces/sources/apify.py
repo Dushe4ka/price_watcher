@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import time
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, InvalidOperation
 from typing import Any, TypeVar
 
 from src.crawlers.base import CategoryCrawlResult
@@ -59,7 +59,7 @@ class ApifySource:
             return _result(SourceOutcome.EMPTY, None, started)
         try:
             products = _map_products(self._marketplace, dataset, request.limit)
-        except (InvalidOperation, OverflowError, TypeError, ValueError):
+        except (DecimalException, OverflowError, TypeError, ValueError):
             return _failure(
                 SourceOutcome.PARSE_DRIFT,
                 SafeErrorCode.PARSE_DRIFT,
@@ -93,7 +93,7 @@ class ApifySource:
             product = _map_product(self._marketplace, dataset[0])
             if product.external_id != request.product_id:
                 raise ValueError('synthetic product id mismatch')
-        except (InvalidOperation, OverflowError, TypeError, ValueError):
+        except (DecimalException, OverflowError, TypeError, ValueError):
             return _failure(
                 SourceOutcome.PARSE_DRIFT,
                 SafeErrorCode.PARSE_DRIFT,
@@ -117,7 +117,7 @@ class ApifySource:
             return _result(SourceOutcome.EMPTY, None, started)
         try:
             products = _map_products(self._marketplace, dataset, request.limit)
-        except (InvalidOperation, OverflowError, TypeError, ValueError):
+        except (DecimalException, OverflowError, TypeError, ValueError):
             return _failure(
                 SourceOutcome.PARSE_DRIFT,
                 SafeErrorCode.PARSE_DRIFT,

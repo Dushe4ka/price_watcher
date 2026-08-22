@@ -238,6 +238,40 @@ class ApifySourceTests(unittest.IsolatedAsyncioTestCase):
                     result.attempt.error_code,
                 )
 
+    async def test_extreme_decimal_exponent_is_parse_drift(self) -> None:
+        from src.marketplaces.sources.apify import ApifySource
+
+        class DatasetClient:
+            def is_enabled(
+                self,
+                marketplace: str,
+                operation: MarketplaceOperation,
+            ) -> bool:
+                return True
+
+            async def run_actor(
+                self,
+                marketplace: str,
+                operation: MarketplaceOperation,
+                request: object,
+            ) -> list[dict[str, object]]:
+                return [
+                    dict(
+                        _PRODUCT,
+                        price='1',
+                        originalPrice='1e1000000',
+                    ),
+                ]
+
+        source = ApifySource('ozon', DatasetClient())
+        result = await source.search_products(
+            SearchRequest(query='synthetic', limit=2),
+        )
+
+        self.assertEqual(SourceOutcome.PARSE_DRIFT, result.outcome)
+        self.assertEqual(SafeErrorCode.PARSE_DRIFT,
+                         result.attempt.error_code)
+
 
 if __name__ == '__main__':
     unittest.main()
