@@ -19,6 +19,7 @@ class SafeErrorCode(StrEnum):
     CONTENT_TOO_LARGE = 'content_too_large'
     INVALID_CONFIG = 'invalid_config'
     PARSE_DRIFT = 'parse_drift'
+    PROFILE_LOCKED = 'profile_locked'
     RATE_LIMITED = 'rate_limited'
     TIMEOUT = 'timeout'
     TRANSPORT_FAILED = 'transport_failed'

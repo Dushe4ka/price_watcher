@@ -17,6 +17,7 @@ from src.browser.allowlist import (
     validate_main_frame_url,
 )
 from src.browser.contracts import PageLike
+from src.browser.profiles import ProfileInUseError
 from src.captcha.coordinator import ChallengeCoordinator
 from src.captcha.models import ChallengeResolution
 from src.core.config import settings
@@ -199,6 +200,8 @@ class _BrowserSourceBase:
             )
         except asyncio.CancelledError:
             raise
+        except ProfileInUseError:
+            return self._failure(_profile_locked(), started)
         except Exception:
             return self._failure(
                 _SourceFailure(
@@ -243,6 +246,8 @@ class _BrowserSourceBase:
             )
         except asyncio.CancelledError:
             raise
+        except ProfileInUseError:
+            return self._failure(_profile_locked(), started)
         except Exception:
             return self._failure(
                 _SourceFailure(
@@ -287,6 +292,8 @@ class _BrowserSourceBase:
             )
         except asyncio.CancelledError:
             raise
+        except ProfileInUseError:
+            return self._failure(_profile_locked(), started)
         except Exception:
             return self._failure(
                 _SourceFailure(
@@ -779,6 +786,8 @@ class OzonBrowserSource(_BrowserSourceBase):
             raise
         except asyncio.TimeoutError:
             raise _timeout_failure() from None
+        except ProfileInUseError:
+            raise _profile_locked() from None
         except Exception:
             raise _SourceFailure(
                 SourceOutcome.TRANSPORT_ERROR,
@@ -999,6 +1008,8 @@ class WildberriesBrowserSource(_BrowserSourceBase):
             raise
         except asyncio.TimeoutError:
             raise _timeout_failure() from None
+        except ProfileInUseError:
+            raise _profile_locked() from None
         except Exception:
             raise _SourceFailure(
                 SourceOutcome.TRANSPORT_ERROR,
@@ -1132,6 +1143,8 @@ class YandexMarketBrowserSource(_BrowserSourceBase):
             raise
         except asyncio.TimeoutError:
             raise _timeout_failure() from None
+        except ProfileInUseError:
+            raise _profile_locked() from None
         except Exception:
             raise _SourceFailure(
                 SourceOutcome.TRANSPORT_ERROR,
@@ -1360,6 +1373,22 @@ def _timeout_failure() -> _SourceFailure:
     return _SourceFailure(
         SourceOutcome.TRANSPORT_ERROR,
         SafeErrorCode.TIMEOUT,
+    )
+
+
+def _profile_locked() -> _SourceFailure:
+    """Name a persistent-profile lock conflict as its own safe failure.
+
+    Another process already owns this marketplace's persistent profile, which
+    is an operator misconfiguration rather than a network fault. The outcome
+    stays ``TRANSPORT_ERROR`` so the chain still falls back to the next
+    source, but the safe error code no longer reads as a transport blip. The
+    raising ``ProfileInUseError`` is never chained or rendered, so no profile
+    path can reach a log line.
+    """
+    return _SourceFailure(
+        SourceOutcome.TRANSPORT_ERROR,
+        SafeErrorCode.PROFILE_LOCKED,
     )
 
 

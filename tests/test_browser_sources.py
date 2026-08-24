@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from src.browser.profiles import ProfileInUseError
 from src.captcha.models import ChallengeResolution
 from src.marketplaces.contracts import (
     CategoryRequest,
@@ -412,6 +413,46 @@ class BrowserSourceOutcomeTests(unittest.IsolatedAsyncioTestCase):
         result = await source.parse_product(ProductRequest('930001'))
 
         self.assertEqual(SourceOutcome.TRANSPORT_ERROR, result.outcome)
+
+    async def test_profile_lock_conflict_is_not_a_generic_transport_error(
+        self,
+    ) -> None:
+        # The lock is acquired lazily inside ``ensure_context()``, so a
+        # profile already owned by another process only surfaces here, during
+        # a real operation. Each marketplace adapter owns its own lease
+        # helper, so all three are checked.
+        cases = (
+            (OzonBrowserSource, '910001'),
+            (WildberriesBrowserSource, '920001'),
+            (YandexMarketBrowserSource, '930001'),
+        )
+        for source_class, product_id in cases:
+            with self.subTest(source=source_class.__name__):
+                manager = FakeManager(
+                    FakePage(html='unused'),
+                    lease_error=ProfileInUseError(
+                        '/synthetic/profiles/api/ozon is already in use',
+                    ),
+                )
+                source = source_class(manager, FakeCoordinator())
+
+                result = await source.parse_product(
+                    ProductRequest(product_id),
+                )
+
+                self.assertEqual(
+                    SourceOutcome.TRANSPORT_ERROR,
+                    result.outcome,
+                )
+                self.assertEqual(
+                    SafeErrorCode.PROFILE_LOCKED,
+                    result.attempt.error_code,
+                )
+                self.assertNotEqual(
+                    SafeErrorCode.TRANSPORT_FAILED,
+                    result.attempt.error_code,
+                )
+                self.assertNotIn('/synthetic/profiles', repr(result))
 
     async def test_malformed_ozon_payload_is_parse_drift(self) -> None:
         page = FakePage(
