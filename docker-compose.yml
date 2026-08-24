@@ -1,34 +1,78 @@
-version: '3.9'
+# Base topology. It deliberately publishes no host ports: pick an overlay.
+#
+#   local:      docker compose -f docker-compose.yml \
+#                              -f docker-compose.local.yml up
+#   production: docker compose -f docker-compose.yml \
+#                              -f docker-compose.production.yml up -d
+#
+# Policy is checked without a Docker daemon by:
+#   python scripts/verify_compose.py docker-compose.yml \
+#       docker-compose.production.yml
 
 volumes:
   pg_data:
   static:
-  ozon_profile:
+  # One persistent browser profile root per process role. Task 8 keys the
+  # profiles by (role, marketplace) underneath it, and the two roles must
+  # never share a volume: a persistent Chromium profile is locked by a
+  # single owner, so a shared volume means one of the two processes cannot
+  # start its browsers at all.
+  api_browser_profiles:
+  bot_browser_profiles:
+
+# Everything a process that owns persistent browsers needs. See
+# infra/playwright/README.md for why each item is here.
+x-browser-runtime: &browser-runtime
+  # Google Chrome for Linux ships amd64 only, and the Ozon session launches
+  # `channel='chrome'`, so `patchright install chrome` fails outright on
+  # arm64. Pinning the platform keeps an Apple Silicon workstation building
+  # the same image the (x86_64) VPS runs, under emulation.
+  platform: linux/amd64
+  user: "10001:10001"
+  shm_size: 1gb
+  security_opt:
+    - seccomp:./infra/playwright/seccomp_profile.json
 
 services:
   api:
+    <<: *browser-runtime
     build:
       context: .
       dockerfile: Dockerfile.api
-    env_file:
-      - .env
     container_name: api
-    ports:
-      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # validate_single_browser_worker() refuses to open a persistent
+      # profile unless this is exactly '1'.
+      WEB_CONCURRENCY: '1'
+      MARKETPLACE_RUNTIME_ROLE: api
+      BROWSER_PROFILE_ROOT: /data/browser-profiles
     depends_on:
       db:
         condition: service_healthy
     volumes:
       - static:/app/media
       - ./config:/app/config:ro
+      - api_browser_profiles:/data/browser-profiles
+
   bot:
+    <<: *browser-runtime
     build:
       context: .
       dockerfile: Dockerfile.bot
-    env_file:
-      - .env
     container_name: telegram_bot
     restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # The bot boots the same BrowserSessionManager as the API, so it is
+      # held to the same single-owner rule.
+      WEB_CONCURRENCY: '1'
+      MARKETPLACE_RUNTIME_ROLE: bot
+      BROWSER_PROFILE_ROOT: /data/browser-profiles
     depends_on:
       db:
         condition: service_healthy
@@ -39,24 +83,24 @@ services:
     volumes:
       - static:/app/media
       - ./config:/app/config:ro
-      - ozon_profile:/app/.ozon-profile
+      - bot_browser_profiles:/data/browser-profiles
+
   nginx:
     build:
       context: ./nginx
       dockerfile: Dockerfile
     container_name: nginx
-    ports:
-      - "80:80"
     depends_on:
       - api
+
   db:
     image: postgres:15-alpine
     container_name: db
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - pg_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U user -d db"]
       interval: 5s

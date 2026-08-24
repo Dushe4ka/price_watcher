@@ -1,8 +1,27 @@
-FROM python:3.12-slim
+# >>> shared browser runtime >>>
+# Keep this block byte-identical with the matching block in the other
+# browser image. Docker has no include directive, so it is duplicated on
+# purpose and compared by scripts/verify_compose.py and
+# tests/test_compose_policy.py. See infra/playwright/README.md.
+#
+# Both processes call start_marketplace_services() at boot, and the default
+# source chains route every marketplace through the browser source, so the
+# API needs exactly the same runtime as the bot.
+FROM python:3.12-slim AS browser-runtime
 
-WORKDIR /app
+# Browsers land outside the building user's home so they stay readable
+# after the image drops to pwuser. BROWSER_PROFILE_ROOT matches the
+# per-service profile volume the Compose files mount.
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    HOME=/home/pwuser \
+    BROWSER_PROFILE_ROOT=/data/browser-profiles
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gnupg \
     libglib2.0-0 \
     libgobject-2.0-0 \
     libnspr4 \
@@ -32,27 +51,46 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tini \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-RUN playwright install chromium
-RUN patchright install chrome
+# The Chromium sandbox is disabled for root, so the seccomp profile in
+# infra/playwright only pays off for an unprivileged user.
+RUN groupadd --gid 10001 pwuser \
+    && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash \
+    pwuser
 
-COPY src ./src
-COPY bot ./bot
-COPY config ./config
-COPY scripts ./scripts
-COPY alembic.ini .
-COPY alembic ./alembic
+WORKDIR /app
 
-# WB's antibot challenge stalls forever under headless Chromium (any mode) but
-# resolves in a couple of seconds under a real headed session; Ozon's
-# patchright/Chrome session also runs headed (its own stealth recommendation)
-# — xvfb-run gives both a virtual display so they can run headed without a
-# physical monitor.
+# Only the main runtime pins are installed here; vendor/ohmycaptcha keeps
+# its own separate environment and never reaches these images.
+COPY requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && playwright install chromium \
+    && patchright install chrome \
+    && chmod -R a+rX /ms-playwright
+
+RUN mkdir -p /data/browser-profiles /app/media \
+    && chown -R 10001:10001 /data/browser-profiles /app/media /home/pwuser
+# <<< shared browser runtime <<<
+
+
+FROM browser-runtime AS bot
+
+COPY src /app/src
+COPY bot /app/bot
+COPY config /app/config
+COPY scripts /app/scripts
+COPY alembic.ini /app/alembic.ini
+COPY alembic /app/alembic
+
+USER 10001:10001
+
+# WB's antibot challenge stalls forever under headless Chromium (any mode)
+# but resolves in a couple of seconds under a real headed session; Ozon's
+# patchright/Chrome session also runs headed. xvfb-run gives both a virtual
+# display without a physical monitor.
 #
-# tini as PID 1 is required, not cosmetic: xvfb-run's internal `wait` for
+# tini as PID 1 is required, not cosmetic: xvfb-run's internal wait for
 # Xvfb's readiness signal relies on real signal delivery, which the kernel
-# handles differently for PID 1 than for any other process — without a proper
-# init in front of it, xvfb-run hangs forever before ever launching Python.
+# handles differently for PID 1 than for any other process - without a
+# proper init in front of it, xvfb-run hangs before ever launching Python.
 ENTRYPOINT ["tini", "--"]
 CMD ["xvfb-run", "-a", "python", "-m", "bot.main"]

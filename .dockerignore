@@ -34,3 +34,17 @@ browser-profiles/
 **/bot/yandex_market/**
 profile_default/
 graphify-out/
+# The vendored OhMyCaptcha snapshot pins its own, older Playwright and runs
+# from .venv-ohmycaptcha. It must never reach an image whose browsers come
+# from the main requirements.txt pins.
+.venv-ohmycaptcha/
+vendor/
+# Never copied into either image; keeping them out of the build context
+# keeps the browser layers from being invalidated by unrelated edits.
+.github/
+.superpowers/
+docs/
+tests/
+media/
+IMPLEMENTATION_PLAN.md
+TODO.md

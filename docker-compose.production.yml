@@ -1,0 +1,40 @@
+# Production (VPS) overlay.
+#
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.production.yml up -d
+#
+# Only nginx is reachable from the network. The API, the bot and the
+# database are published nowhere, and no browser-control or remote
+# debugging endpoint exists in this deployment at all.
+#
+# The profile volumes and WEB_CONCURRENCY below are repeated from the base
+# file on purpose: they are the two settings whose loss silently breaks
+# persistent browser sessions, so production states them itself rather
+# than inheriting them.
+
+services:
+  api:
+    restart: unless-stopped
+    environment:
+      WEB_CONCURRENCY: '1'
+      MARKETPLACE_RUNTIME_ROLE: api
+      BROWSER_PROFILE_ROOT: /data/browser-profiles
+    volumes:
+      - api_browser_profiles:/data/browser-profiles
+
+  bot:
+    restart: unless-stopped
+    environment:
+      WEB_CONCURRENCY: '1'
+      MARKETPLACE_RUNTIME_ROLE: bot
+      BROWSER_PROFILE_ROOT: /data/browser-profiles
+    volumes:
+      - bot_browser_profiles:/data/browser-profiles
+
+  nginx:
+    restart: unless-stopped
+    ports:
+      - "80:80"
+
+  db:
+    restart: unless-stopped

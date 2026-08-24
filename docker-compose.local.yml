@@ -1,0 +1,30 @@
+# Local development overlay.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up
+#
+# Every published port is bound to 127.0.0.1 on purpose. A developer
+# machine is routinely on untrusted networks, and the API, the database
+# and anything a browser session exposes are all unauthenticated from the
+# network's point of view.
+
+services:
+  api:
+    ports:
+      - "127.0.0.1:8000:8000"
+    # A live view of the monitored-category config without a rebuild.
+    volumes:
+      - ./config:/app/config:ro
+
+  bot:
+    # Intentionally no ports: nothing about the bot is reachable inbound,
+    # and a browser-control endpoint must never be published anywhere.
+    environment:
+      PYTHONFAULTHANDLER: '1'
+
+  nginx:
+    ports:
+      - "127.0.0.1:8080:80"
+
+  db:
+    ports:
+      - "127.0.0.1:5432:5432"
