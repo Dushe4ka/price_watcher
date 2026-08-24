@@ -14,7 +14,7 @@ from src.marketplaces.contracts import (
     SourceOutcome,
 )
 from src.marketplaces.service import get_marketplace_service
-from src.parsers.base import ParsedProduct, parse_product_result
+from src.parsers.base import ParsedProduct
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ _ALL_MARKETPLACES: tuple[MarketplaceName, ...] = (
     'ozon',
     'yandex_market',
 )
-_CANDIDATE_DELAY_SEC = 0.4
+_MARKETPLACE_DELAY_SEC = 0.4
 
 _MODEL_RE = re.compile(
     r'\b([A-Za-zА-Яа-яЁё]{2,}[\w\-]*\d[\w\-]*|\d[\w\-]*[A-Za-zА-Яа-яЁё][\w\-]*)\b'
@@ -119,7 +119,11 @@ async def collect_market_prices(
     *,
     limit_per_marketplace: int = 3,
 ) -> MarketSearchOutcome:
-    """Compare one product against the other marketplaces of the chain."""
+    """Compare one product against the other marketplaces of the chain.
+
+    Search already returns fully parsed cards, so a candidate is judged on
+    the data the search itself produced: no second navigation per candidate.
+    """
     del product
     prices: list[Decimal] = []
     marketplaces: list[str] = []
@@ -134,6 +138,7 @@ async def collect_market_prices(
             limit_per_marketplace,
         )
         results.append(search)
+        await asyncio.sleep(_MARKETPLACE_DELAY_SEC)
         if search.outcome is not SourceOutcome.SUCCESS or not search.value:
             logger.debug(
                 'Market search unusable on %s: %s',
@@ -143,24 +148,12 @@ async def collect_market_prices(
             continue
         found_on_marketplace = False
         for candidate in search.value:
-            parsed = await parse_product_result(
-                marketplace,
-                candidate.external_id,
-            )
-            results.append(parsed)
-            if (
-                parsed.outcome is not SourceOutcome.SUCCESS
-                or parsed.value is None
-            ):
+            if not candidate.in_stock:
                 continue
-            item = parsed.value
-            if not item.in_stock:
+            if not title_matches_query(search_query, candidate.title):
                 continue
-            if not title_matches_query(search_query, item.title):
-                continue
-            prices.append(item.price)
+            prices.append(candidate.price)
             found_on_marketplace = True
-            await asyncio.sleep(_CANDIDATE_DELAY_SEC)
 
         if found_on_marketplace:
             marketplaces.append(marketplace)

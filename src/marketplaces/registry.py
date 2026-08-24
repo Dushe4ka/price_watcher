@@ -37,6 +37,7 @@ from src.services.categories_loader import load_categories_config
 log = logging.getLogger(__name__)
 
 CategoryUrls = Mapping[MarketplaceName, Mapping[str, str]]
+CategoryUrlsLoader = Callable[[], CategoryUrls]
 ManagerFactory = Callable[[], BrowserManagerLike]
 CoordinatorFactory = Callable[[], ChallengeCoordinator]
 
@@ -133,6 +134,7 @@ class MarketplaceSourceRegistry:
         coordinator: ChallengeCoordinator | None = None,
         coordinator_factory: CoordinatorFactory | None = None,
         category_urls: CategoryUrls | None = None,
+        category_urls_loader: CategoryUrlsLoader | None = None,
         apify_client: ApifyClient | None = None,
     ) -> None:
         if manager is None and manager_factory is None:
@@ -143,12 +145,16 @@ class MarketplaceSourceRegistry:
         self._coordinator = coordinator
         self._coordinator_factory = coordinator_factory
         self._category_urls = category_urls
+        self._category_urls_loader = (
+            category_urls_loader or load_trusted_category_urls
+        )
         self._apify_client = apify_client or ApifyClient(settings)
         self._chains: dict[
             MarketplaceName,
             tuple[tuple[SourceName, Any], ...],
         ] = {}
         self._closed = False
+        self._started = False
 
     def source_chain(
         self,
@@ -156,6 +162,41 @@ class MarketplaceSourceRegistry:
     ) -> tuple[SourceName, ...]:
         """Return the configured source order for one marketplace."""
         return self._settings.source_chain(marketplace)
+
+    async def start(self) -> None:
+        """Validate browser process isolation before any traffic is served.
+
+        Call once from the composition root at process startup. Failures
+        propagate so a misconfigured process cannot boot and then serve
+        laundered transport errors. Repeated calls are a no-op, and the
+        underlying manager check is itself idempotent.
+        """
+        if self._closed:
+            raise RuntimeError('marketplace source registry is closed')
+        if self._started:
+            return
+        if self._uses_browser_source():
+            manager = self._resolve_manager()
+            start = getattr(manager, 'start', None)
+            if start is not None:
+                await start()
+        self._started = True
+
+    def refresh_category_urls(self) -> None:
+        """Rebuild the trusted category map from configuration.
+
+        Called once per pipeline run so an edited monitored-categories file
+        takes effect without a process restart. The map is always rebuilt
+        from the same trusted loader and every URL is re-validated by
+        :func:`build_category_urls`; caller data never reaches it.
+        """
+        if self._closed:
+            raise RuntimeError('marketplace source registry is closed')
+        urls = self._category_urls_loader()
+        if self._category_urls is not None and urls == self._category_urls:
+            return
+        self._category_urls = urls
+        self._chains.clear()
 
     def sources_for(
         self,
@@ -215,8 +256,14 @@ class MarketplaceSourceRegistry:
         marketplace: MarketplaceName,
     ) -> Mapping[str, str]:
         if self._category_urls is None:
-            self._category_urls = load_trusted_category_urls()
+            self._category_urls = self._category_urls_loader()
         return self._category_urls.get(marketplace, {})
+
+    def _uses_browser_source(self) -> bool:
+        return any(
+            SourceName.BROWSER in self.source_chain(marketplace)
+            for marketplace in MARKETPLACES
+        )
 
     def _resolve_manager(self) -> BrowserManagerLike:
         if self._manager is None:

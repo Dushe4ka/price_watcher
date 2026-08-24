@@ -130,6 +130,33 @@ def configure_marketplace_registry(
     _shut_down = False
 
 
+async def start_marketplace_services() -> None:
+    """Compose and validate shared marketplace resources at process boot.
+
+    Call once from the composition root before the process serves requests
+    or starts polling. A misconfigured worker count or a persistent profile
+    already owned by another process fails here, loudly, instead of being
+    caught per request and reported as a generic transport error.
+    """
+    global _registry
+    if _shut_down:
+        raise RuntimeError('marketplace services are shut down')
+    if _registry is None:
+        _registry = build_default_registry(marketplace_runtime_role())
+    await _registry.start()
+
+
+def refresh_marketplace_category_urls() -> None:
+    """Rebuild the trusted category map from configuration, once per run.
+
+    A no-op until something has composed a registry, because a registry
+    built later reads the configuration afresh anyway.
+    """
+    if _shut_down or _registry is None:
+        return
+    _registry.refresh_category_urls()
+
+
 def get_marketplace_service(
     marketplace: MarketplaceName,
 ) -> MarketplaceService:
@@ -198,4 +225,6 @@ __all__ = (
     'configure_marketplace_runtime',
     'get_marketplace_service',
     'marketplace_runtime_role',
+    'refresh_marketplace_category_urls',
+    'start_marketplace_services',
 )

@@ -64,6 +64,58 @@ def _categories_config() -> CategoriesConfig:
     )
 
 
+def _ozon_config(
+    *slugs: str,
+    crawl_url: str | None = None,
+) -> CategoriesConfig:
+    """Build a config whose every category is served by Ozon only."""
+    return CategoriesConfig.model_validate(
+        {
+            'categories': [
+                {
+                    'slug': slug,
+                    'hashtag': slug,
+                    'name': slug,
+                    'marketplaces': [
+                        {
+                            'marketplace': 'ozon',
+                            'crawl_url': (
+                                crawl_url
+                                if crawl_url is not None
+                                else f'/category/{slug}-1/'
+                            ),
+                        },
+                    ],
+                }
+                for slug in slugs
+            ],
+        },
+    )
+
+
+class FakeCategoryLoader:
+    """Injectable stand-in for the trusted monitored-categories loader."""
+
+    def __init__(self, config: CategoriesConfig) -> None:
+        self.config = config
+        self.calls = 0
+
+    def __call__(self) -> dict[str, dict[str, str]]:
+        self.calls += 1
+        return build_category_urls(self.config)
+
+
+class StartCountingManager(FakeManager):
+    """Lease fake that records how often the manager was really started."""
+
+    def __init__(self, page: FakePage) -> None:
+        super().__init__(page)
+        self.start_calls = 0
+
+    async def start(self) -> None:
+        self.start_calls += 1
+
+
 class CountingManager(FakeManager):
     """Lease fake that records how often the manager was really closed."""
 
@@ -202,6 +254,142 @@ class BrowserSourceInjectionTests(unittest.IsolatedAsyncioTestCase):
             result.attempt.error_code,
         )
         self.assertEqual([], page.goto_urls)
+
+
+class CategoryUrlRefreshTests(unittest.IsolatedAsyncioTestCase):
+    def _registry_with(
+        self,
+        loader: FakeCategoryLoader,
+        manager: FakeManager,
+    ) -> MarketplaceSourceRegistry:
+        return MarketplaceSourceRegistry(
+            settings=make_settings(),
+            manager=manager,
+            coordinator=FakeCoordinator(),
+            category_urls_loader=loader,
+        )
+
+    def _browser_source(self, registry: MarketplaceSourceRegistry) -> object:
+        return dict(registry.sources_for('ozon'))[SourceName.BROWSER]
+
+    async def test_refresh_picks_up_a_newly_configured_slug(self) -> None:
+        page = _ozon_page()
+        loader = FakeCategoryLoader(_ozon_config('beauty'))
+        registry = self._registry_with(loader, FakeManager(page))
+        request = CategoryRequest(category_slug='gadgets', limit=1)
+
+        before = await self._browser_source(registry).crawl_category(request)
+        loader.config = _ozon_config('beauty', 'gadgets')
+        registry.refresh_category_urls()
+        after = await self._browser_source(registry).crawl_category(request)
+
+        self.assertEqual(SourceOutcome.INVALID_CONFIG, before.outcome)
+        self.assertEqual(SourceOutcome.SUCCESS, after.outcome)
+        self.assertIn('url=/category/gadgets-1/', ' '.join(page.expressions))
+
+    async def test_refresh_drops_a_slug_removed_from_the_config(self) -> None:
+        loader = FakeCategoryLoader(_ozon_config('beauty', 'gadgets'))
+        registry = self._registry_with(loader, FakeManager(_ozon_page()))
+        request = CategoryRequest(category_slug='gadgets', limit=1)
+
+        before = await self._browser_source(registry).crawl_category(request)
+        loader.config = _ozon_config('beauty')
+        registry.refresh_category_urls()
+        after = await self._browser_source(registry).crawl_category(request)
+
+        self.assertEqual(SourceOutcome.SUCCESS, before.outcome)
+        self.assertEqual(SourceOutcome.INVALID_CONFIG, after.outcome)
+
+    async def test_refreshed_urls_still_pass_the_allowlist_gate(self) -> None:
+        loader = FakeCategoryLoader(_ozon_config('beauty'))
+        registry = self._registry_with(loader, FakeManager(_ozon_page()))
+        self._browser_source(registry)
+
+        loader.config = _ozon_config(
+            'beauty',
+            crawl_url='https://attacker.invalid/category/beauty-1/',
+        )
+        registry.refresh_category_urls()
+        result = await self._browser_source(registry).crawl_category(
+            CategoryRequest(category_slug='beauty', limit=1),
+        )
+
+        self.assertEqual(SourceOutcome.INVALID_CONFIG, result.outcome)
+
+    def test_unchanged_config_keeps_the_built_adapters(self) -> None:
+        loader = FakeCategoryLoader(_ozon_config('beauty'))
+        registry = self._registry_with(loader, FakeManager(_ozon_page()))
+
+        first = self._browser_source(registry)
+        registry.refresh_category_urls()
+        second = self._browser_source(registry)
+
+        self.assertIs(first, second)
+        self.assertEqual(2, loader.calls)
+
+    async def test_refresh_is_refused_after_close(self) -> None:
+        loader = FakeCategoryLoader(_ozon_config('beauty'))
+        registry = self._registry_with(loader, CountingManager(_ozon_page()))
+
+        await registry.aclose()
+
+        with self.assertRaises(RuntimeError):
+            registry.refresh_category_urls()
+
+
+class RegistryStartupTests(unittest.IsolatedAsyncioTestCase):
+    def _registry(self, manager: FakeManager) -> MarketplaceSourceRegistry:
+        return MarketplaceSourceRegistry(
+            settings=make_settings(),
+            manager=manager,
+            coordinator=FakeCoordinator(),
+            category_urls=build_category_urls(_categories_config()),
+        )
+
+    async def test_start_starts_the_browser_manager(self) -> None:
+        manager = StartCountingManager(_ozon_page())
+        registry = self._registry(manager)
+
+        await registry.start()
+
+        self.assertEqual(1, manager.start_calls)
+
+    async def test_repeated_start_never_starts_twice(self) -> None:
+        manager = StartCountingManager(_ozon_page())
+        registry = self._registry(manager)
+
+        await registry.start()
+        await registry.start()
+
+        self.assertEqual(1, manager.start_calls)
+
+    async def test_start_is_refused_after_close(self) -> None:
+        manager = StartCountingManager(_ozon_page())
+        registry = self._registry(manager)
+
+        await registry.aclose()
+
+        with self.assertRaises(RuntimeError):
+            await registry.start()
+        self.assertEqual(0, manager.start_calls)
+
+    async def test_browserless_chain_never_builds_a_manager(self) -> None:
+        registry = MarketplaceSourceRegistry(
+            settings=make_settings(
+                wildberries_source_chain='apify',
+                ozon_source_chain='apify',
+                yandex_market_source_chain='public',
+            ),
+            manager_factory=_forbidden_manager,
+            coordinator=FakeCoordinator(),
+            category_urls={},
+        )
+
+        await registry.start()
+
+
+def _forbidden_manager() -> FakeManager:
+    raise AssertionError('a browserless chain must not build a manager')
 
 
 class RegistryLifecycleTests(unittest.IsolatedAsyncioTestCase):

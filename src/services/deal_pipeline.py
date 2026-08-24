@@ -20,8 +20,10 @@ from src.database.enums import ModerationStatus
 from src.marketplaces.contracts import ProductRequest, SourceOutcome
 from src.marketplaces.diagnostics import (
     accumulate_marketplace_diagnostics,
+    accumulate_source_attempts,
     summarize_attempts,
 )
+from src.marketplaces.service import refresh_marketplace_category_urls
 from src.parsers.base import ParsedProduct, parse_product_result
 from src.schemas.deal import DealModerationCreate, DealRunStats, PostedDealCreate
 from src.services.categories_loader import load_categories_config
@@ -93,6 +95,7 @@ class DealPipeline:
         if not config.categories:
             logger.warning('No categories configured in YAML')
             return stats
+        refresh_marketplace_category_urls()
 
         for category in config.categories:
             for mp_config in category.marketplaces:
@@ -218,6 +221,10 @@ class DealPipeline:
                     product,
                     marketplace,
                     category_slug,
+                )
+                accumulate_source_attempts(
+                    stats,
+                    market_result.source_attempts,
                 )
                 decision = DiscountEvaluator.apply_market_check(
                     decision,

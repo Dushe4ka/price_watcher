@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import fields
+from unittest.mock import patch
 
 from src.marketplaces.contracts import (
     CategoryRequest,
@@ -13,11 +14,14 @@ from src.marketplaces.contracts import (
     SourceName,
     SourceOutcome,
 )
+from src.marketplaces import service as service_module
 from src.marketplaces.service import (
     MarketplaceService,
     close_marketplace_services,
     configure_marketplace_registry,
     get_marketplace_service,
+    refresh_marketplace_category_urls,
+    start_marketplace_services,
 )
 from tests.marketplace_service_fakes import (
     StubRegistry,
@@ -180,6 +184,48 @@ class ServiceLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await service.aclose()
 
         self.assertEqual(1, registry.close_calls)
+
+    async def test_start_validates_the_configured_registry(self) -> None:
+        registry = StubRegistry(
+            ((SourceName.BROWSER, StubSource(SourceName.BROWSER)),),
+        )
+        configure_marketplace_registry(registry)
+
+        await start_marketplace_services()
+
+        self.assertEqual(1, registry.start_calls)
+
+    async def test_start_after_shutdown_is_refused(self) -> None:
+        configure_marketplace_registry(
+            StubRegistry(
+                ((SourceName.BROWSER, StubSource(SourceName.BROWSER)),),
+            ),
+        )
+
+        await close_marketplace_services()
+
+        with self.assertRaises(RuntimeError):
+            await start_marketplace_services()
+
+    def test_refresh_delegates_to_the_registry(self) -> None:
+        registry = StubRegistry(
+            ((SourceName.BROWSER, StubSource(SourceName.BROWSER)),),
+        )
+        configure_marketplace_registry(registry)
+
+        refresh_marketplace_category_urls()
+
+        self.assertEqual(1, registry.refresh_calls)
+
+    def test_refresh_never_composes_a_registry_on_its_own(self) -> None:
+        configure_marketplace_registry(None)
+
+        with patch.object(
+            service_module,
+            'build_default_registry',
+            side_effect=AssertionError('registry must not be composed here'),
+        ):
+            refresh_marketplace_category_urls()
 
     async def test_services_are_refused_after_shutdown(self) -> None:
         configure_marketplace_registry(

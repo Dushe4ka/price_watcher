@@ -8,6 +8,7 @@ from src.database.db import AsyncSessionLocal
 from src.marketplaces.service import (
     close_marketplace_services,
     configure_marketplace_runtime,
+    start_marketplace_services,
 )
 from src.schemas.deal import DealRunStats
 from src.services.deal_pipeline import DealPipeline
@@ -45,6 +46,7 @@ async def run_deals_pipeline(application: Application) -> DealRunStats:
 
 async def bot_post_init(application: Application) -> None:
     configure_marketplace_runtime('bot')
+    await start_marketplace_services()
     await setup_bot_commands(application)
     await start_deals_scheduler(application)
 

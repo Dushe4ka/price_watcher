@@ -6,7 +6,12 @@ import unittest
 from decimal import Decimal
 from unittest.mock import patch
 
-from src.marketplaces.contracts import SourceName, SourceOutcome
+from src.marketplaces.contracts import (
+    ProductRequest,
+    SearchRequest,
+    SourceName,
+    SourceOutcome,
+)
 from src.marketplaces.service import configure_marketplace_registry
 from src.services.market_search import (
     collect_market_prices,
@@ -32,7 +37,7 @@ def _install(source: StubSource) -> StubRegistry:
 class MarketSearchOutcomeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self._delay = patch(
-            'src.services.market_search._CANDIDATE_DELAY_SEC',
+            'src.services.market_search._MARKETPLACE_DELAY_SEC',
             0,
         )
         self._delay.start()
@@ -83,7 +88,7 @@ class MarketSearchOutcomeTests(unittest.IsolatedAsyncioTestCase):
 class MarketPriceCollectionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self._delay = patch(
-            'src.services.market_search._CANDIDATE_DELAY_SEC',
+            'src.services.market_search._MARKETPLACE_DELAY_SEC',
             0,
         )
         self._delay.start()
@@ -118,6 +123,38 @@ class MarketPriceCollectionTests(unittest.IsolatedAsyncioTestCase):
             outcome.marketplaces,
         )
         self.assertTrue(outcome.results)
+
+    async def test_search_candidates_are_never_reparsed(self) -> None:
+        candidates = (
+            parsed_product('9000002', price='900'),
+            parsed_product('9000003', price='950'),
+        )
+        source = StubSource(
+            SourceName.BROWSER,
+            search=(success(SourceName.BROWSER, candidates),),
+        )
+        _install(source)
+
+        outcome = await collect_market_prices(
+            parsed_product('9000001', price='1500'),
+            'ozon',
+            'Synthetic Item',
+        )
+
+        searches = [
+            request
+            for request in source.requests
+            if isinstance(request, SearchRequest)
+        ]
+        products = [
+            request
+            for request in source.requests
+            if isinstance(request, ProductRequest)
+        ]
+        self.assertEqual(2, len(searches))
+        self.assertEqual([], products)
+        self.assertEqual(2, len(outcome.results))
+        self.assertEqual(4, len(outcome.prices))
 
     async def test_out_of_stock_candidates_are_ignored(self) -> None:
         candidate = parsed_product('9000002', price='900', in_stock=False)

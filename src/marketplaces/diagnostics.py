@@ -7,6 +7,7 @@ counters or the logs built from them.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 from src.marketplaces.contracts import (
@@ -52,6 +53,23 @@ def accumulate_marketplace_diagnostics(
     marketplace_stats.errors += 1
 
 
+def accumulate_source_attempts(
+    stats: MarketplaceRunStats,
+    attempts: Sequence[SourceAttempt],
+) -> None:
+    """Record loose attempts that no single result speaks for.
+
+    A market comparison check aggregates attempts across several
+    marketplaces and several calls, so neither a result outcome nor a
+    marketplace can be attributed to the sequence: only per-source outcome
+    counters and challenges are folded in. Errors and fallback activations
+    stay with :func:`accumulate_marketplace_diagnostics`, which sees whole
+    results.
+    """
+    for attempt in attempts:
+        _record_attempt(stats, attempt)
+
+
 def summarize_attempts(result: MarketplaceResult[Any]) -> str:
     """Render one safe single-line summary of a marketplace result."""
     trail = ' '.join(
@@ -75,5 +93,6 @@ def _record_attempt(
 __all__ = (
     'MarketplaceRunStats',
     'accumulate_marketplace_diagnostics',
+    'accumulate_source_attempts',
     'summarize_attempts',
 )

@@ -124,10 +124,27 @@ class StubRegistry:
     def __init__(
         self,
         chain: Sequence[tuple[SourceName, StubSource]],
+        *,
+        start_error: Exception | None = None,
     ) -> None:
         self._chain = tuple(chain)
+        self._start_error = start_error
         self.close_calls = 0
+        self.start_calls = 0
+        self.refresh_calls = 0
         self.closed = False
+
+    async def start(self) -> None:
+        if self.closed:
+            raise RuntimeError('registry is closed')
+        self.start_calls += 1
+        if self._start_error is not None:
+            raise self._start_error
+
+    def refresh_category_urls(self) -> None:
+        if self.closed:
+            raise RuntimeError('registry is closed')
+        self.refresh_calls += 1
 
     def sources_for(
         self,

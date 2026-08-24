@@ -12,6 +12,7 @@ from src.core.init_db import create_first_superuser
 from src.marketplaces.service import (
     close_marketplace_services,
     configure_marketplace_runtime,
+    start_marketplace_services,
 )
 
 
@@ -23,8 +24,9 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 async def lifespan(app: FastAPI):
     print(f'Приложение запущено! Дата: {datetime.now()}')
     configure_marketplace_runtime('api')
-    await create_first_superuser()
     try:
+        await start_marketplace_services()
+        await create_first_superuser()
         yield
     finally:
         await close_marketplace_services()
