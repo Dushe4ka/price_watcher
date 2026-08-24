@@ -7,8 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.constants import ParseMode
 
+from src.browser.allowlist import UnsafeMarketplaceUrl, build_marketplace_url
 from src.core.config import settings
-from src.crawlers import get_crawler
+from src.crawlers.base import crawl_category_result
 from src.crud.deal_moderation import deal_moderation_crud
 from src.crud.posted_deal import posted_deal_crud
 from src.crud.price_tracking import (
@@ -16,9 +17,12 @@ from src.crud.price_tracking import (
     tracked_product_crud,
 )
 from src.database.enums import ModerationStatus
-from src.parsers import get_parser
-from src.parsers.base import ParsedProduct
-from src.parsers.utils import NotFoundError, ParserError
+from src.marketplaces.contracts import ProductRequest, SourceOutcome
+from src.marketplaces.diagnostics import (
+    accumulate_marketplace_diagnostics,
+    summarize_attempts,
+)
+from src.parsers.base import ParsedProduct, parse_product_result
 from src.schemas.deal import DealModerationCreate, DealRunStats, PostedDealCreate
 from src.services.categories_loader import load_categories_config
 from src.services.discount_evaluator import DealAction, DiscountEvaluator
@@ -32,6 +36,14 @@ _PRODUCT_DELAY_SEC = 0.8
 
 MODERATION_APPROVE_PREFIX = 'deal_mod:approve:'
 MODERATION_REJECT_PREFIX = 'deal_mod:reject:'
+
+
+def _product_url(marketplace: str, product_id: str) -> str | None:
+    """Build a code-owned product URL for an allowlisted marketplace."""
+    try:
+        return build_marketplace_url(marketplace, ProductRequest(product_id))
+    except (UnsafeMarketplaceUrl, TypeError, ValueError):
+        return None
 
 
 class DealPipeline:
@@ -89,10 +101,8 @@ class DealPipeline:
                         session=session,
                         stats=stats,
                         marketplace=mp_config.marketplace,
-                        crawl_url=mp_config.crawl_url,
                         category_slug=category.slug,
                         hashtag=category.hashtag,
-                        search_queries=mp_config.search_queries or None,
                     )
                 except Exception as exc:
                     stats.errors += 1
@@ -110,19 +120,22 @@ class DealPipeline:
         session: AsyncSession,
         stats: DealRunStats,
         marketplace: str,
-        crawl_url: str,
         category_slug: str,
         hashtag: str,
-        search_queries: list[str] | None = None,
     ) -> None:
-        crawler = get_crawler(marketplace)
-        parser = get_parser(marketplace)
-        crawl_result = await crawler.crawl_category(
-            crawl_url=crawl_url,
-            category_slug=category_slug,
+        crawl = await crawl_category_result(
+            marketplace,
+            category_slug,
             limit=settings.max_products_per_category,
-            search_queries=search_queries,
         )
+        accumulate_marketplace_diagnostics(stats, crawl)
+        if crawl.outcome is not SourceOutcome.SUCCESS or crawl.value is None:
+            logger.info(
+                'Category crawl unusable: %s',
+                summarize_attempts(crawl),
+            )
+            return
+        crawl_result = crawl.value
         mp_stats = stats.mp(marketplace)
         n_crawled = len(crawl_result.product_ids)
         stats.crawled += n_crawled
@@ -135,25 +148,20 @@ class DealPipeline:
                 stats.parsed += 1
                 mp_stats.parsed += 1
             else:
-                try:
-                    product = await parser.parse_product(product_id)
-                    stats.parsed += 1
-                    mp_stats.parsed += 1
-                except NotFoundError:
-                    stats.errors += 1
-                    mp_stats.errors += 1
-                    continue
-                except ParserError as exc:
-                    stats.errors += 1
-                    mp_stats.errors += 1
-                    logger.warning(
-                        'Parse error %s/%s: %s',
-                        marketplace,
-                        product_id,
-                        exc,
+                parsed = await parse_product_result(marketplace, product_id)
+                accumulate_marketplace_diagnostics(stats, parsed)
+                if (
+                    parsed.outcome is not SourceOutcome.SUCCESS
+                    or parsed.value is None
+                ):
+                    logger.info(
+                        'Product parse unusable: %s',
+                        summarize_attempts(parsed),
                     )
                     continue
-
+                product = parsed.value
+                stats.parsed += 1
+                mp_stats.parsed += 1
                 await asyncio.sleep(_PRODUCT_DELAY_SEC)
             if not product.in_stock:
                 continue
@@ -176,7 +184,7 @@ class DealPipeline:
                     discount_percent=product.discount_percent,
                     in_stock=product.in_stock,
                     image_url=product.image_url,
-                    product_url=parser.build_url(product_id),
+                    product_url=_product_url(marketplace, product_id),
                 )
 
             tracked = await tracked_product_crud.get_or_create(

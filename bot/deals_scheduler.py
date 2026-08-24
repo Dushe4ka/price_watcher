@@ -5,6 +5,10 @@ from telegram.ext import Application
 from bot.commands import setup_bot_commands
 from src.core.config import settings
 from src.database.db import AsyncSessionLocal
+from src.marketplaces.service import (
+    close_marketplace_services,
+    configure_marketplace_runtime,
+)
 from src.schemas.deal import DealRunStats
 from src.services.deal_pipeline import DealPipeline
 
@@ -20,7 +24,8 @@ async def run_deals_pipeline(application: Application) -> DealRunStats:
         stats = await pipeline.run(session)
     logger.info(
         'Deals pipeline finished: crawled=%s parsed=%s saved=%s matched=%s '
-        'posted=%s moderation=%s skipped=%s market=%s duplicates=%s errors=%s',
+        'posted=%s moderation=%s skipped=%s market=%s duplicates=%s '
+        'errors=%s challenges=%s fallbacks=%s sources=%s',
         stats.crawled,
         stats.parsed,
         stats.prices_saved,
@@ -31,13 +36,28 @@ async def run_deals_pipeline(application: Application) -> DealRunStats:
         stats.skipped_market_check,
         stats.skipped_duplicate,
         stats.errors,
+        stats.challenges,
+        stats.fallback_activations,
+        stats.source_outcomes,
     )
     return stats
 
 
 async def bot_post_init(application: Application) -> None:
+    configure_marketplace_runtime('bot')
     await setup_bot_commands(application)
     await start_deals_scheduler(application)
+
+
+async def bot_post_shutdown(application: Application) -> None:
+    """Stop the scheduler and release marketplace resources exactly once."""
+    scheduler = application.bot_data.pop('deals_scheduler', None)
+    if scheduler is not None:
+        try:
+            scheduler.shutdown(wait=False)
+        except Exception as exc:
+            logger.warning('Deals scheduler shutdown failed: %s', exc)
+    await close_marketplace_services()
 
 
 async def start_deals_scheduler(application: Application) -> None:

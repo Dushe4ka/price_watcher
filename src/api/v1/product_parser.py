@@ -1,9 +1,11 @@
 """Unified product parsing for track API."""
 
-from decimal import Decimal
-
-from src.parsers import get_parser
-from src.parsers.base import ParsedProduct
+from src.marketplaces.contracts import MarketplaceResult
+from src.parsers.base import (
+    ParsedProduct,
+    parse_product,
+    parse_product_result,
+)
 from src.schemas.track import TrackDBCreate, TrackUpdate
 
 
@@ -11,8 +13,16 @@ async def fetch_product_data(
     marketplace: str,
     article: str,
 ) -> ParsedProduct:
-    parser = get_parser(marketplace)
-    return await parser.parse_product(article)
+    """Parse one tracked product, preserving the parser error contract."""
+    return await parse_product(marketplace, article)
+
+
+async def fetch_product_result(
+    marketplace: str,
+    article: str,
+) -> MarketplaceResult[ParsedProduct]:
+    """Parse one tracked product with full source diagnostics."""
+    return await parse_product_result(marketplace, article)
 
 
 def apply_parsed_product_to_track(

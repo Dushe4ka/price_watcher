@@ -4,7 +4,7 @@ import os
 from dotenv import load_dotenv
 from telegram.ext import ApplicationBuilder
 
-from bot.deals_scheduler import bot_post_init
+from bot.deals_scheduler import bot_post_init, bot_post_shutdown
 from bot.handlers import (base_installer_handlers, track_handler_installer,
                           user_installer_handlers)
 from bot.handlers.deals_admin import deals_admin_handlers_installer
@@ -24,6 +24,7 @@ def main():
         ApplicationBuilder()
         .token(os.getenv('TELEGRAM_BOT_TOKEN'))
         .post_init(bot_post_init)
+        .post_shutdown(bot_post_shutdown)
         .build()
     )
     base_installer_handlers(application)

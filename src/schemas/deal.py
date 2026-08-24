@@ -70,6 +70,9 @@ class DealRunStats(BaseModel):
     skipped_market_check: int = 0
     skipped_low_rating: int = 0
     errors: int = 0
+    challenges: int = 0
+    fallback_activations: int = 0
+    source_outcomes: dict[str, dict[str, int]] = Field(default_factory=dict)
     per_marketplace: dict[str, MarketplaceStats] = Field(default_factory=dict)
 
     def mp(self, marketplace: str) -> MarketplaceStats:

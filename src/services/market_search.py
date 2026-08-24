@@ -3,23 +3,28 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 from decimal import Decimal
-from urllib.parse import quote
+from typing import Any
 
-from src.ozon.client import ozon_client
-from src.parsers import get_parser
-from src.parsers.base import ParsedProduct
-from src.parsers.utils import NotFoundError, ParserError, create_http_client
-from src.wb.client import wb_client
-from src.wb.constants import build_search_url
+from src.marketplaces.contracts import (
+    MarketplaceName,
+    MarketplaceResult,
+    SearchRequest,
+    SourceOutcome,
+)
+from src.marketplaces.service import get_marketplace_service
+from src.parsers.base import ParsedProduct, parse_product_result
 
 logger = logging.getLogger(__name__)
 
-_ALL_MARKETPLACES = ('wildberries', 'ozon', 'yandex_market')
-
-_YM_PRODUCT_LINK_RE = re.compile(
-    r'href="[^"]*?/product(?:--[^/"]+)?/(\d+)"'
+_ALL_MARKETPLACES: tuple[MarketplaceName, ...] = (
+    'wildberries',
+    'ozon',
+    'yandex_market',
 )
+_CANDIDATE_DELAY_SEC = 0.4
+
 _MODEL_RE = re.compile(
     r'\b([A-Za-zА-Яа-яЁё]{2,}[\w\-]*\d[\w\-]*|\d[\w\-]*[A-Za-zА-Яа-яЁё][\w\-]*)\b'
 )
@@ -28,6 +33,15 @@ _STOP_WORDS = frozenset({
     'новый', 'новая', 'новое', 'купить', 'цвет', 'размер', 'комплект', 'набор',
     'шт', 'мм', 'см', 'литр', 'л', 'г', 'кг', 'мл', 'год', 'гарантия',
 })
+
+
+@dataclass(frozen=True, slots=True)
+class MarketSearchOutcome:
+    """Comparison prices with the source outcomes that produced them."""
+
+    prices: tuple[Decimal, ...]
+    marketplaces: tuple[str, ...]
+    results: tuple[MarketplaceResult[Any], ...]
 
 
 def build_search_query(title: str) -> str:
@@ -73,18 +87,89 @@ def title_matches_query(query: str, title: str) -> bool:
     return matches >= required
 
 
+async def search_products_result(
+    marketplace: MarketplaceName,
+    query: str,
+    limit: int = 3,
+    page: int = 1,
+) -> MarketplaceResult[tuple[ParsedProduct, ...]]:
+    """Search one marketplace over its configured source chain."""
+    service = get_marketplace_service(marketplace)
+    return await service.search_products(
+        SearchRequest(query=query, limit=limit, page=page),
+    )
+
+
 async def search_product_ids(
-    marketplace: str,
+    marketplace: MarketplaceName,
     query: str,
     limit: int = 3,
 ) -> list[str]:
-    if marketplace == 'wildberries':
-        return await _search_wildberries(query, limit)
-    if marketplace == 'ozon':
-        return await _search_ozon(query, limit)
-    if marketplace == 'yandex_market':
-        return await _search_yandex_market(query, limit)
-    return []
+    """Unwrap a search into product identifiers, or nothing on failure."""
+    result = await search_products_result(marketplace, query, limit)
+    if result.outcome is not SourceOutcome.SUCCESS or result.value is None:
+        return []
+    return [product.external_id for product in result.value]
+
+
+async def collect_market_prices(
+    product: ParsedProduct,
+    source_marketplace: str,
+    search_query: str,
+    *,
+    limit_per_marketplace: int = 3,
+) -> MarketSearchOutcome:
+    """Compare one product against the other marketplaces of the chain."""
+    del product
+    prices: list[Decimal] = []
+    marketplaces: list[str] = []
+    results: list[MarketplaceResult[Any]] = []
+
+    for marketplace in _ALL_MARKETPLACES:
+        if marketplace == source_marketplace:
+            continue
+        search = await search_products_result(
+            marketplace,
+            search_query,
+            limit_per_marketplace,
+        )
+        results.append(search)
+        if search.outcome is not SourceOutcome.SUCCESS or not search.value:
+            logger.debug(
+                'Market search unusable on %s: %s',
+                marketplace,
+                search.outcome.value,
+            )
+            continue
+        found_on_marketplace = False
+        for candidate in search.value:
+            parsed = await parse_product_result(
+                marketplace,
+                candidate.external_id,
+            )
+            results.append(parsed)
+            if (
+                parsed.outcome is not SourceOutcome.SUCCESS
+                or parsed.value is None
+            ):
+                continue
+            item = parsed.value
+            if not item.in_stock:
+                continue
+            if not title_matches_query(search_query, item.title):
+                continue
+            prices.append(item.price)
+            found_on_marketplace = True
+            await asyncio.sleep(_CANDIDATE_DELAY_SEC)
+
+        if found_on_marketplace:
+            marketplaces.append(marketplace)
+
+    return MarketSearchOutcome(
+        prices=tuple(prices),
+        marketplaces=tuple(marketplaces),
+        results=tuple(results),
+    )
 
 
 async def fetch_market_prices(
@@ -94,76 +179,11 @@ async def fetch_market_prices(
     *,
     limit_per_marketplace: int = 3,
 ) -> tuple[list[Decimal], list[str]]:
-    """Ищет похожие товары на других площадках и возвращает их цены."""
-    prices: list[Decimal] = []
-    marketplaces: list[str] = []
-
-    for marketplace in _ALL_MARKETPLACES:
-        if marketplace == source_marketplace:
-            continue
-        product_ids = await search_product_ids(
-            marketplace,
-            search_query,
-            limit=limit_per_marketplace,
-        )
-        if not product_ids:
-            continue
-
-        parser = get_parser(marketplace)
-        found_on_marketplace = False
-        for product_id in product_ids:
-            try:
-                candidate = await parser.parse_product(product_id)
-            except (NotFoundError, ParserError) as exc:
-                logger.debug(
-                    'Market search parse failed %s/%s: %s',
-                    marketplace,
-                    product_id,
-                    exc,
-                )
-                continue
-            if not candidate.in_stock:
-                continue
-            if not title_matches_query(search_query, candidate.title):
-                continue
-            prices.append(candidate.price)
-            found_on_marketplace = True
-            await asyncio.sleep(0.4)
-
-        if found_on_marketplace:
-            marketplaces.append(marketplace)
-
-    return prices, marketplaces
-
-
-async def _search_wildberries(query: str, limit: int) -> list[str]:
-    product_ids, _ = await wb_client.category_products(
-        build_search_url(query), limit,
+    """Unwrap comparison prices for call sites that need only the values."""
+    outcome = await collect_market_prices(
+        product,
+        source_marketplace,
+        search_query,
+        limit_per_marketplace=limit_per_marketplace,
     )
-    return product_ids
-
-
-async def _search_ozon(query: str, limit: int) -> list[str]:
-    return await ozon_client.search_product_ids(query, limit)
-
-
-async def _search_yandex_market(query: str, limit: int) -> list[str]:
-    url = f'https://market.yandex.ru/search?text={quote(query)}'
-    headers = {
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'ru-RU,ru;q=0.9',
-    }
-    async with create_http_client(headers=headers) as client:
-        response = await client.get(url)
-        if response.status_code != 200:
-            return []
-        html = response.text
-
-    product_ids: list[str] = []
-    for match in _YM_PRODUCT_LINK_RE.finditer(html):
-        product_id = match.group(1)
-        if product_id not in product_ids:
-            product_ids.append(product_id)
-        if len(product_ids) >= limit:
-            break
-    return product_ids
+    return list(outcome.prices), list(outcome.marketplaces)

@@ -6,8 +6,12 @@ from decimal import Decimal
 from enum import StrEnum
 
 from src.core.config import settings
+from src.marketplaces.contracts import SourceAttempt
 from src.parsers.base import ParsedProduct
-from src.services.market_search import build_search_query, fetch_market_prices
+from src.services.market_search import (
+    build_search_query,
+    collect_market_prices,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +33,7 @@ class MarketCheckResult:
     market_avg_price: Decimal | None = None
     market_discount_percent: int | None = None
     compared_marketplaces: tuple[str, ...] = ()
+    source_attempts: tuple[SourceAttempt, ...] = ()
 
 
 class MarketPriceChecker:
@@ -71,22 +76,28 @@ class MarketPriceChecker:
                 search_query=search_query,
             )
 
-        prices, marketplaces = await fetch_market_prices(
+        outcome = await collect_market_prices(
             product,
             source_marketplace,
             search_query,
         )
+        prices = outcome.prices
+        attempts = tuple(
+            attempt
+            for result in outcome.results
+            for attempt in result.attempts
+        )
         if not prices:
             logger.info(
-                'Market check inconclusive for %s (%s)',
-                product.title[:60],
-                search_query,
+                'Market check inconclusive over %s source attempts',
+                len(attempts),
             )
             return MarketCheckResult(
                 required=True,
                 status=MarketCheckStatus.INCONCLUSIVE,
                 reason='market_check_no_data',
                 search_query=search_query,
+                source_attempts=attempts,
             )
 
         market_min = min(prices)
@@ -105,7 +116,8 @@ class MarketPriceChecker:
                 market_min_price=market_min,
                 market_avg_price=market_avg,
                 market_discount_percent=market_discount,
-                compared_marketplaces=tuple(marketplaces),
+                compared_marketplaces=outcome.marketplaces,
+                source_attempts=attempts,
             )
 
         return MarketCheckResult(
@@ -116,5 +128,6 @@ class MarketPriceChecker:
             market_min_price=market_min,
             market_avg_price=market_avg,
             market_discount_percent=market_discount,
-            compared_marketplaces=tuple(marketplaces),
+            compared_marketplaces=outcome.marketplaces,
+            source_attempts=attempts,
         )

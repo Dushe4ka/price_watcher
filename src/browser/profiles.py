@@ -8,7 +8,7 @@ import os
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from src.browser.allowlist import (
     UnsafeMarketplaceUrl,
@@ -16,6 +16,9 @@ from src.browser.allowlist import (
 )
 from src.browser.contracts import BrowserContextLike, PageLike
 from src.marketplaces.contracts import MarketplaceName
+
+if TYPE_CHECKING:
+    from src.core.config import RuntimeRole, Settings
 
 
 class ProfileInUseError(RuntimeError):
@@ -282,24 +285,33 @@ def _consume_task_exception(task: asyncio.Task[None]) -> None:
         pass
 
 
+def build_sessions(
+    role: RuntimeRole | None = None,
+    settings: Settings | None = None,
+) -> dict[MarketplaceName, PersistentBrowserSession]:
+    """Build one persistent session per marketplace for a process role."""
+    from src.browser.yandex_market import YandexMarketBrowserSession
+    from src.core.config import settings as default_settings
+    from src.ozon.session import OzonBrowserSession
+    from src.wb.session import WBBrowserSession
+
+    active = default_settings if settings is None else settings
+    profile_role = active.runtime_role if role is None else role
+    return {
+        'ozon': OzonBrowserSession(
+            profile_dir=active.profile_dir(profile_role, 'ozon'),
+        ),
+        'wildberries': WBBrowserSession(
+            profile_dir=active.profile_dir(profile_role, 'wildberries'),
+        ),
+        'yandex_market': YandexMarketBrowserSession(
+            profile_dir=active.profile_dir(profile_role, 'yandex_market'),
+        ),
+    }
+
+
 def _default_sessions() -> dict[
     MarketplaceName,
     PersistentBrowserSession,
 ]:
-    from src.browser.yandex_market import YandexMarketBrowserSession
-    from src.core.config import settings
-    from src.ozon.session import OzonBrowserSession
-    from src.wb.session import WBBrowserSession
-
-    role = settings.runtime_role
-    return {
-        'ozon': OzonBrowserSession(
-            profile_dir=settings.profile_dir(role, 'ozon'),
-        ),
-        'wildberries': WBBrowserSession(
-            profile_dir=settings.profile_dir(role, 'wildberries'),
-        ),
-        'yandex_market': YandexMarketBrowserSession(
-            profile_dir=settings.profile_dir(role, 'yandex_market'),
-        ),
-    }
+    return build_sessions()

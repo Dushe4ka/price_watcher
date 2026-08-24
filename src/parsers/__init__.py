@@ -1,6 +1,11 @@
 """Парсеры карточек товаров с маркетплейсов."""
 
-from src.parsers.base import BaseParser, ParsedProduct
+from src.parsers.base import (
+    BaseParser,
+    ParsedProduct,
+    parse_product,
+    parse_product_result,
+)
 
 PARSERS: dict[str, BaseParser] = {}
 
@@ -34,4 +39,6 @@ __all__ = [
     'ParsedProduct',
     'PARSERS',
     'get_parser',
+    'parse_product',
+    'parse_product_result',
 ]

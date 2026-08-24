@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from src.crawlers.base import CategoryCrawlResult, MarketplaceCrawler
+from src.crawlers.base import (
+    CategoryCrawlResult,
+    MarketplaceCrawler,
+    crawl_category,
+    crawl_category_result,
+)
 
 _CRAWLER_CACHE: dict[str, MarketplaceCrawler] = {}
 
@@ -50,5 +55,7 @@ __all__ = [
     'CategoryCrawlResult',
     'MarketplaceCrawler',
     'CRAWLERS',
+    'crawl_category',
+    'crawl_category_result',
     'get_crawler',
 ]
