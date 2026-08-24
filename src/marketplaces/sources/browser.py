@@ -55,6 +55,48 @@ _MAX_ITEMS = 100
 _MAX_PAGE = 100
 _MAX_QUERY_LENGTH = 500
 
+# Evaluate results are JSON-derived values; bound traversal depth and charge a
+# small fixed cost per non-string scalar so the size probe stays finite.
+_MAX_RESULT_DEPTH = 32
+_SCALAR_RESULT_BYTES = 32
+
+# The Ozon capture envelope wraps an already byte-capped body in a short
+# ``kind``/``status``/``url`` triple. Allow for that envelope without
+# loosening the body cap enforced in the page and in ``_decode_capture``.
+_CAPTURE_ENVELOPE_BYTES = 1024
+
+# Fetch forbidden request headers: a browser silently drops these from the
+# headers object handed to ``fetch()``, so passing one would advertise a value
+# the request never actually carries. ``User-Agent`` is the load-bearing case
+# here - the in-page fetch always goes out with the browser context's own UA,
+# and the mobile UA in OZON_MOBILE_HEADERS is only honoured by the plain HTTP
+# client in ``src/ozon/client.py``. See
+# https://fetch.spec.whatwg.org/#forbidden-request-header
+_FETCH_FORBIDDEN_HEADERS = frozenset((
+    'accept-charset',
+    'accept-encoding',
+    'access-control-request-headers',
+    'access-control-request-method',
+    'connection',
+    'content-length',
+    'cookie',
+    'cookie2',
+    'date',
+    'dnt',
+    'expect',
+    'host',
+    'keep-alive',
+    'origin',
+    'permissions-policy',
+    'referer',
+    'te',
+    'trailer',
+    'transfer-encoding',
+    'upgrade',
+    'user-agent',
+    'via',
+))
+
 
 class BrowserManagerLike(Protocol):
     """Lease surface required from the browser session manager."""
@@ -77,6 +119,14 @@ class _SourceFailure(Exception):
         self.outcome = outcome
         self.error_code = error_code
         super().__init__('browser source returned a typed outcome')
+
+
+class _OperationState:
+    __slots__ = ('expired', 'page')
+
+    def __init__(self) -> None:
+        self.expired = False
+        self.page: PageLike | None = None
 
 
 class _BrowserSourceBase:
@@ -112,16 +162,31 @@ class _BrowserSourceBase:
         self._timeout_ms = max(1, math.ceil(timeout * 1000))
         self._max_content_bytes = content_limit
         self._clock = clock
+        self._background_tasks: set[asyncio.Future[Any]] = set()
 
     async def crawl_category(
         self,
         request: CategoryRequest,
     ) -> SourceResult[CategoryCrawlResult]:
         started = self._clock()
+        deadline = self._deadline()
+        state = _OperationState()
         try:
+            if not isinstance(request, CategoryRequest):
+                raise _invalid_config()
             _validate_limit(request.limit)
             url = self._category_url(request.category_slug)
-            return await self._execute_category(request, url, started)
+            return await self._complete_operation(
+                deadline,
+                state,
+                lambda: self._execute_category(
+                    request,
+                    url,
+                    started,
+                    deadline,
+                    state,
+                ),
+            )
         except _SourceFailure as exc:
             return self._failure(exc, started)
         except UnsafeMarketplaceUrl:
@@ -148,10 +213,24 @@ class _BrowserSourceBase:
         request: ProductRequest,
     ) -> SourceResult[ParsedProduct]:
         started = self._clock()
+        deadline = self._deadline()
+        state = _OperationState()
         try:
+            if not isinstance(request, ProductRequest):
+                raise _invalid_config()
             _validate_product_id(request.product_id)
             url = build_marketplace_url(self.marketplace, request)
-            return await self._execute_product(request, url, started)
+            return await self._complete_operation(
+                deadline,
+                state,
+                lambda: self._execute_product(
+                    request,
+                    url,
+                    started,
+                    deadline,
+                    state,
+                ),
+            )
         except _SourceFailure as exc:
             return self._failure(exc, started)
         except UnsafeMarketplaceUrl:
@@ -178,10 +257,24 @@ class _BrowserSourceBase:
         request: SearchRequest,
     ) -> SourceResult[tuple[ParsedProduct, ...]]:
         started = self._clock()
+        deadline = self._deadline()
+        state = _OperationState()
         try:
+            if not isinstance(request, SearchRequest):
+                raise _invalid_config()
             _validate_search_request(request)
             url = build_marketplace_url(self.marketplace, request)
-            return await self._execute_search(request, url, started)
+            return await self._complete_operation(
+                deadline,
+                state,
+                lambda: self._execute_search(
+                    request,
+                    url,
+                    started,
+                    deadline,
+                    state,
+                ),
+            )
         except _SourceFailure as exc:
             return self._failure(exc, started)
         except UnsafeMarketplaceUrl:
@@ -204,7 +297,11 @@ class _BrowserSourceBase:
             )
 
     def _category_url(self, category_slug: str) -> str:
-        if not category_slug or len(category_slug) > 128:
+        if (
+            not isinstance(category_slug, str)
+            or not category_slug
+            or len(category_slug) > 128
+        ):
             raise _invalid_config()
         try:
             url = self._category_urls[category_slug]
@@ -224,17 +321,55 @@ class _BrowserSourceBase:
             raise _timeout_failure()
         return remaining * 1000
 
+    async def _complete_operation(
+        self,
+        deadline: OperationDeadline,
+        state: _OperationState,
+        operation: Callable[[], Awaitable[T]],
+    ) -> T:
+        remaining = deadline.expires_at - self._clock()
+        if not math.isfinite(remaining) or remaining <= 0:
+            state.expired = True
+            raise _timeout_failure()
+        task = asyncio.ensure_future(operation())
+        try:
+            done, _ = await asyncio.wait((task,), timeout=remaining)
+        except BaseException:
+            state.expired = True
+            self._schedule_close(state.page)
+            task.cancel()
+            self._track_background_task(task)
+            raise
+        if task in done:
+            if self._clock() > deadline.expires_at:
+                state.expired = True
+                self._schedule_close(state.page)
+                _discard_completed_task(task)
+                raise _timeout_failure()
+            try:
+                return task.result()
+            except asyncio.TimeoutError:
+                raise _timeout_failure() from None
+        state.expired = True
+        self._schedule_close(state.page)
+        task.cancel()
+        self._track_background_task(task)
+        raise _timeout_failure()
+
     async def _navigate(
         self,
         page: PageLike,
         url: str,
         deadline: OperationDeadline,
+        state: _OperationState,
     ) -> int:
+        self._ensure_active(state, deadline)
         self._ensure_open(page)
         validate_main_frame_url(self.marketplace, url)
         response = await self._bounded(
             page,
             deadline,
+            state,
             lambda: page.goto(
                 url,
                 wait_until='domcontentloaded',
@@ -257,14 +392,16 @@ class _BrowserSourceBase:
         self,
         page: PageLike,
         deadline: OperationDeadline,
+        state: _OperationState,
     ) -> ChallengeResolution:
+        self._ensure_safe_page(page, deadline, state)
         resolution = await self._bounded(
             page,
             deadline,
+            state,
             lambda: self._coordinator.resolve(page, deadline=deadline),
         )
-        self._ensure_open(page)
-        validate_main_frame_url(self.marketplace, page.url)
+        self._ensure_safe_page(page, deadline, state)
         if resolution is ChallengeResolution.CHALLENGE_UNSOLVABLE:
             if self._clock() >= deadline.expires_at:
                 raise _timeout_failure()
@@ -286,10 +423,16 @@ class _BrowserSourceBase:
         self,
         page: PageLike,
         deadline: OperationDeadline,
+        state: _OperationState,
     ) -> str:
-        html = await self._bounded(page, deadline, page.content)
-        self._ensure_open(page)
-        validate_main_frame_url(self.marketplace, page.url)
+        self._ensure_safe_page(page, deadline, state)
+        html = await self._bounded(
+            page,
+            deadline,
+            state,
+            page.content,
+        )
+        self._ensure_safe_page(page, deadline, state)
         if not isinstance(html, str):
             raise _parse_drift()
         try:
@@ -307,14 +450,18 @@ class _BrowserSourceBase:
         self,
         page: PageLike,
         deadline: OperationDeadline,
+        state: _OperationState,
         expression: str,
         *,
+        max_bytes: int | None = None,
         open_page_error: _SourceFailure | None = None,
     ) -> object:
+        self._ensure_safe_page(page, deadline, state)
         try:
             result = await self._bounded(
                 page,
                 deadline,
+                state,
                 lambda: page.evaluate(expression),
             )
         except (_SourceFailure, asyncio.CancelledError):
@@ -323,37 +470,94 @@ class _BrowserSourceBase:
             if page.is_closed() or open_page_error is None:
                 raise
             raise open_page_error from None
-        self._ensure_open(page)
-        validate_main_frame_url(self.marketplace, page.url)
+        self._ensure_safe_page(page, deadline, state)
+        _ensure_result_within_limit(
+            result,
+            self._max_content_bytes if max_bytes is None else max_bytes,
+        )
         return result
 
     async def _bounded(
         self,
         page: PageLike,
         deadline: OperationDeadline,
+        state: _OperationState,
         operation: Callable[[], Awaitable[T]],
     ) -> T:
+        self._ensure_active(state, deadline)
         remaining = deadline.expires_at - self._clock()
         if not math.isfinite(remaining) or remaining <= 0:
-            await _close_safely(page)
+            state.expired = True
+            self._schedule_close(page)
             raise _timeout_failure()
         task = asyncio.ensure_future(operation())
         try:
             done, _ = await asyncio.wait((task,), timeout=remaining)
         except BaseException:
+            state.expired = True
+            self._schedule_close(page)
             task.cancel()
-            await _close_safely(page)
+            self._track_background_task(task)
             raise
         if task in done:
             try:
                 return task.result()
             except asyncio.TimeoutError:
-                await _close_safely(page)
+                state.expired = True
+                self._schedule_close(page)
                 raise _timeout_failure() from None
+        state.expired = True
+        self._schedule_close(page)
         task.cancel()
-        task.add_done_callback(_consume_background_task)
-        await _close_safely(page)
+        self._track_background_task(task)
         raise _timeout_failure()
+
+    def _ensure_active(
+        self,
+        state: _OperationState,
+        deadline: OperationDeadline,
+    ) -> None:
+        if state.expired or self._clock() >= deadline.expires_at:
+            state.expired = True
+            raise _timeout_failure()
+
+    def _ensure_safe_page(
+        self,
+        page: PageLike,
+        deadline: OperationDeadline,
+        state: _OperationState,
+    ) -> None:
+        self._ensure_active(state, deadline)
+        self._ensure_open(page)
+        validate_main_frame_url(self.marketplace, page.url)
+
+    def _schedule_close(self, page: PageLike | None) -> None:
+        if page is None:
+            return
+        try:
+            close_task = asyncio.ensure_future(_close_safely(page))
+        except Exception:
+            return
+        self._track_background_task(close_task)
+
+    def _track_background_task(
+        self,
+        task: asyncio.Future[Any],
+    ) -> None:
+        if task in self._background_tasks:
+            return
+        self._background_tasks.add(task)
+        task.add_done_callback(self._consume_background_task)
+
+    def _consume_background_task(
+        self,
+        task: asyncio.Future[Any],
+    ) -> None:
+        self._background_tasks.discard(task)
+        try:
+            task.result()
+        except BaseException:
+            pass
 
     @staticmethod
     def _ensure_open(page: PageLike) -> None:
@@ -405,6 +609,8 @@ class _BrowserSourceBase:
         request: CategoryRequest,
         url: str,
         started: float,
+        deadline: OperationDeadline,
+        state: _OperationState,
     ) -> SourceResult[CategoryCrawlResult]:
         raise NotImplementedError
 
@@ -413,6 +619,8 @@ class _BrowserSourceBase:
         request: ProductRequest,
         url: str,
         started: float,
+        deadline: OperationDeadline,
+        state: _OperationState,
     ) -> SourceResult[ParsedProduct]:
         raise NotImplementedError
 
@@ -421,6 +629,8 @@ class _BrowserSourceBase:
         request: SearchRequest,
         url: str,
         started: float,
+        deadline: OperationDeadline,
+        state: _OperationState,
     ) -> SourceResult[tuple[ParsedProduct, ...]]:
         raise NotImplementedError
 
@@ -435,12 +645,14 @@ class OzonBrowserSource(_BrowserSourceBase):
         request: CategoryRequest,
         url: str,
         started: float,
+        deadline: OperationDeadline,
+        state: _OperationState,
     ) -> SourceResult[CategoryCrawlResult]:
-        payload = await self._payload(url)
-        state = validate_ozon_payload(payload)
-        if state is ValidationState.VALID_EMPTY:
+        payload = await self._payload(url, deadline, state)
+        validation_state = validate_ozon_payload(payload)
+        if validation_state is ValidationState.VALID_EMPTY:
             return self._semantic_empty(started)
-        _require_items(state)
+        _require_items(validation_state)
         try:
             products = extract_product_summary_map(
                 payload,
@@ -467,12 +679,19 @@ class OzonBrowserSource(_BrowserSourceBase):
         request: ProductRequest,
         url: str,
         started: float,
+        deadline: OperationDeadline,
+        state: _OperationState,
     ) -> SourceResult[ParsedProduct]:
-        payload = await self._payload(url, not_found_on_404=True)
-        state = validate_ozon_payload(payload)
-        if state is ValidationState.VALID_EMPTY:
+        payload = await self._payload(
+            url,
+            deadline,
+            state,
+            not_found_on_404=True,
+        )
+        validation_state = validate_ozon_payload(payload)
+        if validation_state is ValidationState.VALID_EMPTY:
             return self._semantic_empty(started, product=True)
-        _require_items(state)
+        _require_items(validation_state)
         try:
             products = extract_product_summary_map(payload, limit=100)
         except Exception:
@@ -487,12 +706,14 @@ class OzonBrowserSource(_BrowserSourceBase):
         request: SearchRequest,
         url: str,
         started: float,
+        deadline: OperationDeadline,
+        state: _OperationState,
     ) -> SourceResult[tuple[ParsedProduct, ...]]:
-        payload = await self._payload(url)
-        state = validate_ozon_payload(payload)
-        if state is ValidationState.VALID_EMPTY:
+        payload = await self._payload(url, deadline, state)
+        validation_state = validate_ozon_payload(payload)
+        if validation_state is ValidationState.VALID_EMPTY:
             return self._semantic_empty(started)
-        _require_items(state)
+        _require_items(validation_state)
         try:
             mapped = extract_product_summary_map(payload, limit=request.limit)
         except Exception:
@@ -505,23 +726,47 @@ class OzonBrowserSource(_BrowserSourceBase):
     async def _payload(
         self,
         target_url: str,
+        deadline: OperationDeadline,
+        state: _OperationState,
         *,
         not_found_on_404: bool = False,
     ) -> dict[str, Any]:
-        deadline = self._deadline()
         try:
             async with self._manager.lease(self.marketplace) as page:
-                status = await self._navigate(page, OZON_HOME_URL, deadline)
-                resolution = await self._resolve_challenge(page, deadline)
-                _raise_for_status(status, resolution=resolution)
-                api_url = _ozon_api_url(target_url)
-                capture = await self._evaluate(
+                state.page = page
+                self._ensure_active(state, deadline)
+                status = await self._navigate(
+                    page,
+                    OZON_HOME_URL,
+                    deadline,
+                    state,
+                )
+                resolution = await self._resolve_challenge(
                     page,
                     deadline,
-                    _ozon_fetch_expression(api_url),
+                    state,
                 )
-                await self._resolve_challenge(page, deadline)
-                validate_main_frame_url(self.marketplace, page.url)
+                _raise_for_status(status, resolution=resolution)
+                api_url = _ozon_api_url(target_url)
+                capture = await self._capture(page, deadline, state, api_url)
+                post_resolution = await self._resolve_challenge(
+                    page,
+                    deadline,
+                    state,
+                )
+                if post_resolution is ChallengeResolution.SOLVED:
+                    capture = await self._capture(
+                        page,
+                        deadline,
+                        state,
+                        api_url,
+                    )
+                    await self._resolve_challenge(
+                        page,
+                        deadline,
+                        state,
+                    )
+                self._ensure_safe_page(page, deadline, state)
                 return self._decode_capture(
                     capture,
                     not_found_on_404=not_found_on_404,
@@ -540,6 +785,21 @@ class OzonBrowserSource(_BrowserSourceBase):
                 SafeErrorCode.TRANSPORT_FAILED,
             ) from None
 
+    async def _capture(
+        self,
+        page: PageLike,
+        deadline: OperationDeadline,
+        state: _OperationState,
+        api_url: str,
+    ) -> object:
+        return await self._evaluate(
+            page,
+            deadline,
+            state,
+            _ozon_fetch_expression(api_url, self._max_content_bytes),
+            max_bytes=self._max_content_bytes + _CAPTURE_ENVELOPE_BYTES,
+        )
+
     def _decode_capture(
         self,
         capture: object,
@@ -548,20 +808,34 @@ class OzonBrowserSource(_BrowserSourceBase):
     ) -> dict[str, Any]:
         if not isinstance(capture, dict):
             raise _parse_drift()
+        kind = capture.get('kind')
+        if kind == 'redirect':
+            raise _SourceFailure(
+                SourceOutcome.CHALLENGE,
+                SafeErrorCode.CHALLENGE_DETECTED,
+            )
+        if kind == 'unsafe_response':
+            raise _invalid_config()
+        if kind == 'too_large':
+            raise _SourceFailure(
+                SourceOutcome.PARSE_DRIFT,
+                SafeErrorCode.CONTENT_TOO_LARGE,
+            )
+        if kind == 'invalid_encoding':
+            raise _parse_drift()
+        if kind not in ('body', 'status'):
+            raise _parse_drift()
         status = capture.get('status')
         response_url = capture.get('url')
-        body = capture.get('body')
         if isinstance(status, bool) or not isinstance(status, int):
             raise _parse_drift()
         if not isinstance(response_url, str):
             raise _parse_drift()
         validate_main_frame_url(self.marketplace, response_url)
-        if status == 307:
-            raise _SourceFailure(
-                SourceOutcome.CHALLENGE,
-                SafeErrorCode.CHALLENGE_DETECTED,
-            )
         _raise_for_status(status, not_found_on_404=not_found_on_404)
+        if kind != 'body':
+            raise _parse_drift()
+        body = capture.get('body')
         if not isinstance(body, str):
             raise _parse_drift()
         try:
@@ -592,12 +866,19 @@ class WildberriesBrowserSource(_BrowserSourceBase):
         request: CategoryRequest,
         url: str,
         started: float,
+        deadline: OperationDeadline,
+        state: _OperationState,
     ) -> SourceResult[CategoryCrawlResult]:
-        snapshot, raw = await self._snapshot(url, CATEGORY_CARDS_JS)
-        state = validate_wb_dom_snapshot(snapshot)
-        if state is ValidationState.VALID_EMPTY:
+        snapshot, raw = await self._snapshot(
+            url,
+            CATEGORY_CARDS_JS,
+            deadline,
+            state,
+        )
+        validation_state = validate_wb_dom_snapshot(snapshot)
+        if validation_state is ValidationState.VALID_EMPTY:
             return self._semantic_empty(started)
-        _require_items(state)
+        _require_items(validation_state)
         products = _map_wb_cards(raw, request.limit)
         result = CategoryCrawlResult(
             marketplace=self.marketplace,
@@ -613,16 +894,20 @@ class WildberriesBrowserSource(_BrowserSourceBase):
         request: ProductRequest,
         url: str,
         started: float,
+        deadline: OperationDeadline,
+        state: _OperationState,
     ) -> SourceResult[ParsedProduct]:
         snapshot, raw = await self._snapshot(
             url,
             DETAIL_PAGE_JS,
+            deadline,
+            state,
             not_found_on_404=True,
         )
-        state = validate_wb_dom_snapshot(snapshot)
-        if state is ValidationState.VALID_EMPTY:
+        validation_state = validate_wb_dom_snapshot(snapshot)
+        if validation_state is ValidationState.VALID_EMPTY:
             return self._semantic_empty(started, product=True)
-        _require_items(state)
+        _require_items(validation_state)
         if not isinstance(raw, dict):
             raise _parse_drift()
         try:
@@ -638,12 +923,19 @@ class WildberriesBrowserSource(_BrowserSourceBase):
         request: SearchRequest,
         url: str,
         started: float,
+        deadline: OperationDeadline,
+        state: _OperationState,
     ) -> SourceResult[tuple[ParsedProduct, ...]]:
-        snapshot, raw = await self._snapshot(url, CATEGORY_CARDS_JS)
-        state = validate_wb_dom_snapshot(snapshot)
-        if state is ValidationState.VALID_EMPTY:
+        snapshot, raw = await self._snapshot(
+            url,
+            CATEGORY_CARDS_JS,
+            deadline,
+            state,
+        )
+        validation_state = validate_wb_dom_snapshot(snapshot)
+        if validation_state is ValidationState.VALID_EMPTY:
             return self._semantic_empty(started)
-        _require_items(state)
+        _require_items(validation_state)
         products = _map_wb_cards(raw, request.limit)
         return self._success(products, started, item_count=len(products))
 
@@ -651,32 +943,50 @@ class WildberriesBrowserSource(_BrowserSourceBase):
         self,
         url: str,
         expression: str,
+        deadline: OperationDeadline,
+        state: _OperationState,
         *,
         not_found_on_404: bool = False,
     ) -> tuple[str, object]:
-        deadline = self._deadline()
         try:
             async with self._manager.lease(self.marketplace) as page:
-                status = await self._navigate(page, url, deadline)
-                resolution = await self._resolve_challenge(page, deadline)
+                state.page = page
+                self._ensure_active(state, deadline)
+                status = await self._navigate(
+                    page,
+                    url,
+                    deadline,
+                    state,
+                )
+                resolution = await self._resolve_challenge(
+                    page,
+                    deadline,
+                    state,
+                )
                 _raise_for_status(
                     status,
                     resolution=resolution,
                     not_found_on_404=not_found_on_404,
                 )
-                snapshot = await self._html(page, deadline)
+                snapshot = await self._html(page, deadline, state)
                 raw = await self._evaluate(
                     page,
                     deadline,
+                    state,
                     expression,
                     open_page_error=_parse_drift(),
                 )
-                post_resolution = await self._resolve_challenge(page, deadline)
+                post_resolution = await self._resolve_challenge(
+                    page,
+                    deadline,
+                    state,
+                )
                 if post_resolution is ChallengeResolution.SOLVED:
-                    snapshot = await self._html(page, deadline)
+                    snapshot = await self._html(page, deadline, state)
                     raw = await self._evaluate(
                         page,
                         deadline,
+                        state,
                         expression,
                         open_page_error=_parse_drift(),
                     )
@@ -710,12 +1020,14 @@ class YandexMarketBrowserSource(_BrowserSourceBase):
         request: CategoryRequest,
         url: str,
         started: float,
+        deadline: OperationDeadline,
+        state: _OperationState,
     ) -> SourceResult[CategoryCrawlResult]:
-        html = await self._snapshot(url)
-        state = validate_yandex_html(html)
-        if state is ValidationState.VALID_EMPTY:
+        html = await self._snapshot(url, deadline, state)
+        validation_state = validate_yandex_html(html)
+        if validation_state is ValidationState.VALID_EMPTY:
             return self._semantic_empty(started)
-        _require_items(state)
+        _require_items(validation_state)
         products = self._map_products(html, request.limit)
         result = CategoryCrawlResult(
             marketplace=self.marketplace,
@@ -731,12 +1043,19 @@ class YandexMarketBrowserSource(_BrowserSourceBase):
         request: ProductRequest,
         url: str,
         started: float,
+        deadline: OperationDeadline,
+        state: _OperationState,
     ) -> SourceResult[ParsedProduct]:
-        html = await self._snapshot(url, not_found_on_404=True)
-        state = validate_yandex_html(html)
-        if state is ValidationState.VALID_EMPTY:
+        html = await self._snapshot(
+            url,
+            deadline,
+            state,
+            not_found_on_404=True,
+        )
+        validation_state = validate_yandex_html(html)
+        if validation_state is ValidationState.VALID_EMPTY:
             return self._semantic_empty(started, product=True)
-        _require_items(state)
+        _require_items(validation_state)
         for item in iter_ld_json_products(html):
             product_id = product_id_from_ld_json(item)
             if product_id != request.product_id:
@@ -757,35 +1076,53 @@ class YandexMarketBrowserSource(_BrowserSourceBase):
         request: SearchRequest,
         url: str,
         started: float,
+        deadline: OperationDeadline,
+        state: _OperationState,
     ) -> SourceResult[tuple[ParsedProduct, ...]]:
-        html = await self._snapshot(url)
-        state = validate_yandex_html(html)
-        if state is ValidationState.VALID_EMPTY:
+        html = await self._snapshot(url, deadline, state)
+        validation_state = validate_yandex_html(html)
+        if validation_state is ValidationState.VALID_EMPTY:
             return self._semantic_empty(started)
-        _require_items(state)
+        _require_items(validation_state)
         products = self._map_products(html, request.limit)
         return self._success(products, started, item_count=len(products))
 
     async def _snapshot(
         self,
         url: str,
+        deadline: OperationDeadline,
+        state: _OperationState,
         *,
         not_found_on_404: bool = False,
     ) -> str:
-        deadline = self._deadline()
         try:
             async with self._manager.lease(self.marketplace) as page:
-                status = await self._navigate(page, url, deadline)
-                resolution = await self._resolve_challenge(page, deadline)
+                state.page = page
+                self._ensure_active(state, deadline)
+                status = await self._navigate(
+                    page,
+                    url,
+                    deadline,
+                    state,
+                )
+                resolution = await self._resolve_challenge(
+                    page,
+                    deadline,
+                    state,
+                )
                 _raise_for_status(
                     status,
                     resolution=resolution,
                     not_found_on_404=not_found_on_404,
                 )
-                snapshot = await self._html(page, deadline)
-                post_resolution = await self._resolve_challenge(page, deadline)
+                snapshot = await self._html(page, deadline, state)
+                post_resolution = await self._resolve_challenge(
+                    page,
+                    deadline,
+                    state,
+                )
                 if post_resolution is ChallengeResolution.SOLVED:
-                    snapshot = await self._html(page, deadline)
+                    snapshot = await self._html(page, deadline, state)
                 return snapshot
         except _SourceFailure:
             raise
@@ -864,20 +1201,68 @@ def _ozon_api_url(target_url: str) -> str:
     return validate_main_frame_url('ozon', api_url)
 
 
-def _ozon_fetch_expression(api_url: str) -> str:
+def _ozon_fetch_expression(api_url: str, max_content_bytes: int) -> str:
     url_literal = json.dumps(api_url)
-    headers_literal = json.dumps(OZON_MOBILE_HEADERS)
+    # Drop headers the Fetch spec forbids (notably ``User-Agent``): the browser
+    # would strip them anyway, so emitting them would only claim a mobile UA
+    # the request never sends while the context's own UA goes out instead.
+    headers_literal = json.dumps({
+        name: value
+        for name, value in OZON_MOBILE_HEADERS.items()
+        if name.lower() not in _FETCH_FORBIDDEN_HEADERS
+    })
     return (
         'async () => {'
+        f'const maxBytes = {max_content_bytes};'
         f'const response = await fetch({url_literal}, {{'
         "credentials: 'include',"
-        f'headers: {headers_literal}'
+        f'headers: {headers_literal},'
+        "redirect: 'manual'"
         '});'
-        'return {'
-        'status: response.status,'
-        'url: response.url,'
-        'body: await response.text()'
-        '};'
+        'if (response.redirected || '
+        "response.type === 'opaqueredirect' || "
+        '(response.status >= 300 && response.status < 400)) {'
+        "return {kind: 'redirect'};"
+        '}'
+        'let finalUrl;'
+        'try { finalUrl = new URL(response.url); } '
+        "catch (_) { return {kind: 'unsafe_response'}; }"
+        'const safeUrl = '
+        "finalUrl.protocol === 'https:' && "
+        "finalUrl.hostname === 'www.ozon.ru' && "
+        "(finalUrl.port === '' || finalUrl.port === '443') && "
+        "finalUrl.username === '' && finalUrl.password === '';"
+        "if (!safeUrl) { return {kind: 'unsafe_response'}; }"
+        'if (response.status < 200 || response.status >= 300) {'
+        "return {kind: 'status', status: response.status, "
+        'url: response.url};'
+        '}'
+        "if (!response.body) { return {kind: 'invalid_encoding'}; }"
+        'const reader = response.body.getReader();'
+        "const decoder = new TextDecoder('utf-8', {fatal: true});"
+        "let body = ''; let total = 0;"
+        'try {'
+        'while (true) {'
+        'const chunk = await reader.read();'
+        'if (chunk.done) { break; }'
+        'if (!(chunk.value instanceof Uint8Array)) {'
+        'try { await reader.cancel(); } catch (_) {}'
+        "return {kind: 'invalid_encoding'};"
+        '}'
+        'total += chunk.value.byteLength;'
+        'if (total > maxBytes) {'
+        'try { await reader.cancel(); } catch (_) {}'
+        "return {kind: 'too_large'};"
+        '}'
+        'body += decoder.decode(chunk.value, {stream: true});'
+        '}'
+        'body += decoder.decode();'
+        '} catch (_) {'
+        'try { await reader.cancel(); } catch (_) {}'
+        "return {kind: 'invalid_encoding'};"
+        '}'
+        "return {kind: 'body', status: response.status, "
+        'url: response.url, body};'
         '}'
     )
 
@@ -923,7 +1308,8 @@ def _require_items(state: ValidationState) -> None:
 
 def _validate_product_id(product_id: str) -> None:
     if (
-        not product_id
+        not isinstance(product_id, str)
+        or not product_id
         or len(product_id) > 30
         or not product_id.isascii()
         or not product_id.isdigit()
@@ -933,13 +1319,23 @@ def _validate_product_id(product_id: str) -> None:
 
 
 def _validate_limit(limit: int) -> None:
-    if isinstance(limit, bool) or not 1 <= limit <= _MAX_ITEMS:
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 1 <= limit <= _MAX_ITEMS
+    ):
         raise _invalid_config()
 
 
 def _validate_search_request(request: SearchRequest) -> None:
     _validate_limit(request.limit)
-    if isinstance(request.page, bool) or not 1 <= request.page <= _MAX_PAGE:
+    if (
+        isinstance(request.page, bool)
+        or not isinstance(request.page, int)
+        or not 1 <= request.page <= _MAX_PAGE
+    ):
+        raise _invalid_config()
+    if not isinstance(request.query, str):
         raise _invalid_config()
     query = request.query.strip()
     if not query or len(query) > _MAX_QUERY_LENGTH:
@@ -990,18 +1386,56 @@ def _result(
     )
 
 
+def _discard_completed_task(task: asyncio.Future[Any]) -> None:
+    """Retrieve a finished task's outcome so asyncio never logs it."""
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except (asyncio.CancelledError, asyncio.InvalidStateError):
+        pass
+
+
+def _ensure_result_within_limit(result: object, limit: int) -> None:
+    """Bound the encoded size of an in-page evaluation result."""
+    total = 0
+    stack: list[tuple[object, int]] = [(result, 0)]
+    while stack:
+        item, depth = stack.pop()
+        if depth > _MAX_RESULT_DEPTH:
+            raise _parse_drift()
+        if isinstance(item, str):
+            try:
+                total += len(item.encode('utf-8'))
+            except UnicodeError:
+                raise _parse_drift() from None
+        elif isinstance(item, (bytes, bytearray)):
+            total += len(item)
+        elif isinstance(item, Mapping):
+            total += 2
+            for key, value in item.items():
+                total += 2
+                stack.append((key, depth + 1))
+                stack.append((value, depth + 1))
+        elif isinstance(item, (list, tuple)):
+            total += 2
+            for value in item:
+                total += 1
+                stack.append((value, depth + 1))
+        else:
+            total += _SCALAR_RESULT_BYTES
+        if total > limit:
+            raise _SourceFailure(
+                SourceOutcome.PARSE_DRIFT,
+                SafeErrorCode.CONTENT_TOO_LARGE,
+            )
+
+
 async def _close_safely(page: PageLike) -> None:
     try:
         if not page.is_closed():
             await page.close()
     except Exception:
-        pass
-
-
-def _consume_background_task(task: asyncio.Future[Any]) -> None:
-    try:
-        task.result()
-    except BaseException:
         pass
 
 

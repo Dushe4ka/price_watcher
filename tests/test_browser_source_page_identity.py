@@ -16,6 +16,7 @@ from src.marketplaces.sources.browser import (
     YandexMarketBrowserSource,
 )
 from tests.browser_source_fakes import (
+    DecoyPageManager,
     FakeCoordinator,
     FakeManager,
     FakePage,
@@ -42,6 +43,7 @@ class BrowserSourcePageIdentityTests(unittest.IsolatedAsyncioTestCase):
                 FakePage(
                     html='<html>Ozon</html>',
                     evaluation={
+                        'kind': 'body',
                         'status': 200,
                         'url': OZON_API_URL,
                         'body': _fixture('ozon/success.json'),
@@ -94,6 +96,7 @@ class BrowserSourcePageIdentityTests(unittest.IsolatedAsyncioTestCase):
                 FakePage(
                     html='<html>Ozon</html>',
                     evaluation={
+                        'kind': 'body',
                         'status': 200,
                         'url': OZON_API_URL,
                         'body': _fixture('ozon/success.json'),
@@ -147,6 +150,7 @@ class BrowserSourcePageIdentityTests(unittest.IsolatedAsyncioTestCase):
                 page = FakePage(
                     html='unused',
                     evaluation={
+                        'kind': 'body',
                         'status': 200,
                         'url': OZON_API_URL,
                         'body': _fixture('ozon/success.json'),
@@ -204,28 +208,44 @@ class BrowserSourcePageIdentityTests(unittest.IsolatedAsyncioTestCase):
         leased = FakePage(
             html='unused',
             evaluation={
+                'kind': 'body',
                 'status': 200,
                 'url': OZON_API_URL,
                 'body': _fixture('ozon/drift.json'),
             },
         )
-        other = FakePage(
-            html='unused',
+        decoy = FakePage(
+            html='<html>Ozon</html>',
             evaluation={
+                'kind': 'body',
                 'status': 200,
                 'url': OZON_API_URL,
                 'body': _fixture('ozon/success.json'),
             },
         )
-        source = OzonBrowserSource(
-            FakeManager(leased),
-            FakeCoordinator(),
-        )
+        manager = DecoyPageManager(leased, decoy)
+        coordinator = FakeCoordinator()
+        source = OzonBrowserSource(manager, coordinator)
 
         result = await source.parse_product(ProductRequest('910001'))
 
+        # The decoy is wired into the same manager the source holds and is what
+        # `manager.page` / `manager.pages[0]` return, so a source that captured
+        # from any Page other than the leased one would have decoded
+        # success.json and reported SUCCESS instead of drift.
+        self.assertIs(decoy, manager.page)
+        self.assertIs(decoy, manager.pages[0])
         self.assertEqual(SourceOutcome.PARSE_DRIFT, result.outcome)
-        self.assertEqual([], other.evaluation_pages)
+        self.assertEqual([leased], leased.evaluation_pages)
+        self.assertEqual([], decoy.goto_urls)
+        self.assertEqual([], decoy.content_pages)
+        self.assertEqual([], decoy.evaluation_pages)
+        self.assertTrue(coordinator.pages)
+        self.assertTrue(all(item is leased for item in coordinator.pages))
+        # No event channel exists on either Page, so no stray callback from the
+        # decoy could feed the outcome in the first place.
+        self.assertEqual({}, leased.handlers)
+        self.assertEqual({}, decoy.handlers)
 
     async def test_late_redirect_after_solved_challenge_is_rejected(
         self,

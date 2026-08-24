@@ -24,6 +24,8 @@ from tests.browser_source_fakes import (
     FakeCoordinator,
     FakeManager,
     FakePage,
+    SequenceEvaluationPage,
+    SequencedUrlPage,
 )
 
 
@@ -53,6 +55,7 @@ class BrowserSourceHappyPathTests(unittest.IsolatedAsyncioTestCase):
         page = FakePage(
             html='<html>Ozon</html>',
             evaluation={
+                'kind': 'body',
                 'status': 200,
                 'url': OZON_API_URL,
                 'body': _fixture('ozon/success.json'),
@@ -70,6 +73,7 @@ class BrowserSourceHappyPathTests(unittest.IsolatedAsyncioTestCase):
         page = FakePage(
             html='<html>Ozon</html>',
             evaluation={
+                'kind': 'body',
                 'status': 200,
                 'url': OZON_API_URL,
                 'body': _fixture('ozon/success.json'),
@@ -90,6 +94,7 @@ class BrowserSourceHappyPathTests(unittest.IsolatedAsyncioTestCase):
         page = FakePage(
             html='<html>Ozon</html>',
             evaluation={
+                'kind': 'body',
                 'status': 200,
                 'url': OZON_API_URL,
                 'body': _fixture('ozon/success.json'),
@@ -227,6 +232,7 @@ class BrowserSourceOutcomeTests(unittest.IsolatedAsyncioTestCase):
                 FakeManager(FakePage(
                     html='<html>Ozon</html>',
                     evaluation={
+                        'kind': 'body',
                         'status': 200,
                         'url': OZON_API_URL,
                         'body': _fixture('ozon/empty.json'),
@@ -338,9 +344,9 @@ class BrowserSourceOutcomeTests(unittest.IsolatedAsyncioTestCase):
         page = FakePage(
             html='unused',
             evaluation={
+                'kind': 'status',
                 'status': 429,
                 'url': OZON_API_URL,
-                'body': '',
             },
         )
         source = OzonBrowserSource(FakeManager(page), FakeCoordinator())
@@ -354,9 +360,7 @@ class BrowserSourceOutcomeTests(unittest.IsolatedAsyncioTestCase):
         page = FakePage(
             html='unused',
             evaluation={
-                'status': 200,
-                'url': 'https://attacker.invalid/synthetic.json',
-                'body': _fixture('ozon/success.json'),
+                'kind': 'unsafe_response',
             },
         )
         source = OzonBrowserSource(FakeManager(page), FakeCoordinator())
@@ -369,9 +373,7 @@ class BrowserSourceOutcomeTests(unittest.IsolatedAsyncioTestCase):
         page = FakePage(
             html='unused',
             evaluation={
-                'status': 307,
-                'url': OZON_API_URL,
-                'body': '',
+                'kind': 'redirect',
             },
         )
         source = OzonBrowserSource(FakeManager(page), FakeCoordinator())
@@ -415,6 +417,7 @@ class BrowserSourceOutcomeTests(unittest.IsolatedAsyncioTestCase):
         page = FakePage(
             html='unused',
             evaluation={
+                'kind': 'body',
                 'status': 200,
                 'url': OZON_API_URL,
                 'body': '{malformed',
@@ -444,6 +447,7 @@ class BrowserSourceOutcomeTests(unittest.IsolatedAsyncioTestCase):
         page = FakePage(
             html='<html>Ozon</html>',
             evaluation={
+                'kind': 'body',
                 'status': 200,
                 'url': OZON_API_URL,
                 'body': _fixture('ozon/success.json'),
@@ -474,6 +478,129 @@ class BrowserSourceOutcomeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(SourceOutcome.PARSE_DRIFT, result.outcome)
 
+    async def test_navigation_403_is_challenge(self) -> None:
+        page = FakePage(
+            html=_fixture('yandex_market/challenge.html'),
+            status=403,
+        )
+        source = YandexMarketBrowserSource(
+            FakeManager(page),
+            FakeCoordinator(),
+        )
+
+        result = await source.parse_product(ProductRequest('930001'))
+
+        self.assertEqual(SourceOutcome.CHALLENGE, result.outcome)
+
+    async def test_navigation_5xx_is_transport_error(self) -> None:
+        page = FakePage(html='synthetic upstream failure', status=503)
+        source = YandexMarketBrowserSource(
+            FakeManager(page),
+            FakeCoordinator(),
+        )
+
+        result = await source.parse_product(ProductRequest('930001'))
+
+        self.assertEqual(SourceOutcome.TRANSPORT_ERROR, result.outcome)
+        self.assertEqual(
+            SafeErrorCode.TRANSPORT_FAILED,
+            result.attempt.error_code,
+        )
+
+    async def test_ozon_solved_post_capture_uses_fresh_capture(self) -> None:
+        page = SequenceEvaluationPage(
+            html='<html>Ozon</html>',
+            evaluations=[
+                {
+                    'kind': 'body',
+                    'status': 200,
+                    'url': OZON_API_URL,
+                    'body': _fixture('ozon/drift.json'),
+                },
+                {
+                    'kind': 'body',
+                    'status': 200,
+                    'url': OZON_API_URL,
+                    'body': _fixture('ozon/success.json'),
+                },
+            ],
+        )
+        coordinator = FakeCoordinator(
+            ChallengeResolution.NO_CHALLENGE,
+            ChallengeResolution.SOLVED,
+            ChallengeResolution.NO_CHALLENGE,
+        )
+        source = OzonBrowserSource(FakeManager(page), coordinator)
+
+        result = await source.parse_product(ProductRequest('910001'))
+
+        self.assertEqual(SourceOutcome.SUCCESS, result.outcome)
+        self.assertEqual(2, len(page.evaluation_pages))
+
+
+class BrowserSourceRuntimeBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_runtime_dto_values_are_invalid_config(self) -> None:
+        invalid_calls = (
+            ('product-bool', 'parse_product', ProductRequest(True)),
+            ('product-object', 'parse_product', object()),
+            (
+                'search-query-bool',
+                'search_products',
+                SearchRequest(query=True, limit=1),
+            ),
+            (
+                'search-limit-bool',
+                'search_products',
+                SearchRequest(query='x', limit=True),
+            ),
+            (
+                'search-page-bool',
+                'search_products',
+                SearchRequest(query='x', limit=1, page=True),
+            ),
+            (
+                'category-slug-int',
+                'crawl_category',
+                CategoryRequest(category_slug=7, limit=1),
+            ),
+            (
+                'category-limit-bool',
+                'crawl_category',
+                CategoryRequest(category_slug='trusted', limit=True),
+            ),
+        )
+        for label, method_name, request in invalid_calls:
+            with self.subTest(label=label):
+                page = FakePage(html='unused')
+                source = YandexMarketBrowserSource(
+                    FakeManager(page),
+                    FakeCoordinator(),
+                    category_urls={
+                        'trusted': 'https://market.yandex.ru/catalog--x/1',
+                    },
+                )
+
+                method = getattr(source, method_name)
+                result = await method(request)
+
+                self.assertEqual(SourceOutcome.INVALID_CONFIG, result.outcome)
+                self.assertEqual([], page.goto_urls)
+
+    async def test_url_race_before_coordinator_prevents_coordinator_call(
+        self,
+    ) -> None:
+        page = SequencedUrlPage(
+            html=_fixture('yandex_market/success.html'),
+            unsafe_after_reads=1,
+        )
+        coordinator = FakeCoordinator()
+        source = YandexMarketBrowserSource(FakeManager(page), coordinator)
+
+        result = await source.parse_product(ProductRequest('930001'))
+
+        self.assertEqual(SourceOutcome.INVALID_CONFIG, result.outcome)
+        self.assertEqual([], coordinator.pages)
+
     async def test_invalid_ozon_capture_shape_is_parse_drift(self) -> None:
         page = FakePage(html='unused', evaluation=['not', 'a', 'mapping'])
         source = OzonBrowserSource(FakeManager(page), FakeCoordinator())
@@ -488,6 +615,7 @@ class BrowserSourceOutcomeTests(unittest.IsolatedAsyncioTestCase):
         page = FakePage(
             html='unused',
             evaluation={
+                'kind': 'body',
                 'status': 200,
                 'url': OZON_API_URL,
                 'body': body,
