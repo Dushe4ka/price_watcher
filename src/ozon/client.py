@@ -8,7 +8,11 @@ from urllib.parse import quote
 
 from src.core.config import settings
 from src.marketplaces.contracts import SourceOutcome
-from src.marketplaces.errors import MarketplaceSourceError, SafeErrorCode
+from src.marketplaces.errors import (
+    MarketplaceSourceError,
+    SafeErrorCode,
+    bounded_retry_after_ms,
+)
 from src.marketplaces.validation import ValidationState, validate_ozon_payload
 from src.ozon.constants import (
     OZON_MOBILE_HEADERS,
@@ -111,6 +115,9 @@ class OzonClient:
                 raise MarketplaceSourceError(
                     SourceOutcome.RATE_LIMITED,
                     SafeErrorCode.RATE_LIMITED,
+                    retry_after_ms=bounded_retry_after_ms(
+                        response.headers.get('retry-after'),
+                    ),
                 )
             if status in (403, 307) or _looks_like_antibot(text):
                 observed_challenge = True

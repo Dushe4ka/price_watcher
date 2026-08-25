@@ -24,12 +24,20 @@ from src.marketplaces.diagnostics import (
     summarize_attempts,
 )
 from src.marketplaces.service import refresh_marketplace_category_urls
+from src.marketplaces.telemetry import safe_exception_label
 from src.parsers.base import ParsedProduct, parse_product_result
-from src.schemas.deal import DealModerationCreate, DealRunStats, PostedDealCreate
+from src.schemas.deal import (
+    DealModerationCreate,
+    DealRunStats,
+    PostedDealCreate,
+)
 from src.services.categories_loader import load_categories_config
 from src.services.discount_evaluator import DealAction, DiscountEvaluator
 from src.services.market_price_checker import MarketPriceChecker
-from src.services.post_formatter import format_deal_post, format_moderation_request
+from src.services.post_formatter import (
+    format_deal_post,
+    format_moderation_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +81,9 @@ class DealPipeline:
                 )
             except Exception as exc:
                 logger.warning(
-                    'Photo send failed for chat %s, fallback to text: %s',
+                    'Photo send failed for chat %s, fallback to text (%s)',
                     chat_id,
-                    exc,
+                    safe_exception_label(exc),
                 )
         return await self._bot.send_message(
             chat_id=chat_id,
@@ -110,10 +118,9 @@ class DealPipeline:
                 except Exception as exc:
                     stats.errors += 1
                     logger.warning(
-                        'Category crawl failed %s/%s: %s',
-                        category.slug,
+                        'Category crawl failed on %s (%s)',
                         mp_config.marketplace,
-                        exc,
+                        safe_exception_label(exc),
                     )
                 await asyncio.sleep(_CATEGORY_DELAY_SEC)
         return stats
@@ -385,10 +392,9 @@ class DealPipeline:
         except Exception as exc:
             await session.rollback()
             logger.warning(
-                'Failed to log moderation for %s/%s: %s',
+                'Failed to log moderation on %s (%s)',
                 marketplace,
-                product.external_id,
-                exc,
+                safe_exception_label(exc),
             )
 
     async def _send_to_moderation(
@@ -403,8 +409,8 @@ class DealPipeline:
     ) -> None:
         if not self._bot or not settings.admin_telegram_id_list:
             logger.warning(
-                'Admin not configured, skip moderation for %s',
-                product.title,
+                'Admin not configured, skip moderation on %s',
+                marketplace,
             )
             await self._log_moderation(
                 session,
@@ -486,9 +492,9 @@ class DealPipeline:
                         first_message_id = message.message_id
                 except Exception as exc:
                     logger.warning(
-                        'Failed to send moderation to admin %s: %s',
+                        'Failed to send moderation to admin %s (%s)',
                         admin_id,
-                        exc,
+                        safe_exception_label(exc),
                     )
 
             if first_message_id is None:
@@ -502,12 +508,13 @@ class DealPipeline:
                 admin_message_id=first_message_id,
             )
         except Exception as exc:
-            logger.exception('Failed to send moderation request: %s', exc)
+            label = safe_exception_label(exc)
+            logger.error('Failed to send moderation request (%s)', label)
             await deal_moderation_crud.update_status(
                 session,
                 moderation,
                 ModerationStatus.SKIPPED,
-                f'moderation_send_failed: {exc}',
+                f'moderation_send_failed: {label}',
             )
 
     async def _post_to_channel(
@@ -525,12 +532,12 @@ class DealPipeline:
         market_discount_percent: int | None = None,
     ) -> int | None:
         if not settings.deals_enabled:
-            logger.info('Deals disabled, skip post: %s', product.title)
+            logger.info('Deals disabled, skip post on %s', marketplace)
             return 0
         if not self._bot or not settings.telegram_channel_id:
             logger.warning(
-                'Channel not configured, skip post: %s',
-                product.title,
+                'Channel not configured, skip post on %s',
+                marketplace,
             )
             return None
 
@@ -556,7 +563,10 @@ class DealPipeline:
             )
             return message.message_id
         except Exception as exc:
-            logger.exception('Failed to post deal to channel: %s', exc)
+            logger.error(
+                'Failed to post deal to channel (%s)',
+                safe_exception_label(exc),
+            )
             return None
 
     async def post_approved_moderation(

@@ -9,12 +9,14 @@ from bot.handlers import (base_installer_handlers, track_handler_installer,
                           user_installer_handlers)
 from bot.handlers.deals_admin import deals_admin_handlers_installer
 from bot.handlers.deal_moderation import deal_moderation_handlers_installer
+from src.marketplaces.telemetry import silence_transport_request_logs
 
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
 )
+silence_transport_request_logs()
 
 load_dotenv()
 

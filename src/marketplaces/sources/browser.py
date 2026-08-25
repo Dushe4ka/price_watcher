@@ -1289,6 +1289,9 @@ def _raise_for_status(
     if status == 404 and not_found_on_404:
         raise _SourceFailure(SourceOutcome.NOT_FOUND, None)
     if status == 429:
+        # The in-page fetch bridge returns only status, URL and body, so no
+        # ``Retry-After`` header exists here: the attempt keeps
+        # ``retry_after_ms=None`` rather than inventing a cooldown.
         raise _SourceFailure(
             SourceOutcome.RATE_LIMITED,
             SafeErrorCode.RATE_LIMITED,

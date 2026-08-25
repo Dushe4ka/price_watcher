@@ -63,6 +63,13 @@ class SourceAttempt:
     item_count: int
     error_code: SafeErrorCode | None = None
     transport_attempts: int = 1
+    retry_after_ms: int | None = None
+    """Server-advertised cooldown, present only for a rate limited attempt.
+
+    ``None`` means the source published no usable hint: an in-page ``429``
+    exposes no response headers to the browser transport, so a browser
+    attempt legitimately carries no value rather than a fabricated one.
+    """
 
     def __post_init__(self) -> None:
         if self.duration_ms < 0:
@@ -71,6 +78,13 @@ class SourceAttempt:
             raise ValueError('item_count must not be negative')
         if self.transport_attempts < 0:
             raise ValueError('transport_attempts must not be negative')
+        if self.retry_after_ms is not None:
+            if self.retry_after_ms < 0:
+                raise ValueError('retry_after_ms must not be negative')
+            if self.outcome is not SourceOutcome.RATE_LIMITED:
+                raise ValueError(
+                    'retry_after_ms requires a rate limited outcome'
+                )
         if self.transport_attempts == 0 and (
             self.outcome is not SourceOutcome.TRANSPORT_ERROR
             or self.error_code is not SafeErrorCode.TIMEOUT
@@ -154,6 +168,7 @@ def source_failure(
     source: SourceName,
     outcome: SourceOutcome,
     error_code: SafeErrorCode,
+    retry_after_ms: int | None = None,
 ) -> SourceResult[None]:
     """Create a failure result with safe diagnostic metadata only."""
     if outcome in (SourceOutcome.SUCCESS, SourceOutcome.EMPTY):
@@ -168,5 +183,6 @@ def source_failure(
             duration_ms=0,
             item_count=0,
             error_code=error_code,
+            retry_after_ms=retry_after_ms,
         ),
     )

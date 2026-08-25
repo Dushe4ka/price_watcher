@@ -56,6 +56,11 @@ class ApifyRateLimitError(MarketplaceSourceError):
         super().__init__(
             SourceOutcome.RATE_LIMITED,
             SafeErrorCode.RATE_LIMITED,
+            retry_after_ms=(
+                None
+                if retry_after_seconds is None
+                else retry_after_seconds * 1000
+            ),
         )
 
 

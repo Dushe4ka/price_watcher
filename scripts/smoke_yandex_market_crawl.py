@@ -1,4 +1,4 @@
-"""Gated smoke check: one bounded Ozon category crawl, safe output only.
+"""Gated smoke check: one bounded Yandex Market crawl, safe output only.
 
 This script performs no network call unless ``LIVE_MARKETPLACE_TESTS=1`` is
 set, and prints only the allowlisted marketplace telemetry: never a product
@@ -6,7 +6,7 @@ identity, title, URL or response body.
 
 Run::
 
-    LIVE_MARKETPLACE_TESTS=1 python -m scripts.smoke_ozon_crawl
+    LIVE_MARKETPLACE_TESTS=1 python -m scripts.smoke_yandex_market_crawl
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from scripts.live_marketplace_probe import (
 )
 
 
-MARKETPLACE = 'ozon'
+MARKETPLACE = 'yandex_market'
 OPERATION = 'crawl_category'
 
 

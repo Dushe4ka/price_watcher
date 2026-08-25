@@ -17,7 +17,11 @@ from src.marketplaces.contracts import (
     SourceOutcome,
     SourceResult,
 )
-from src.marketplaces.errors import MarketplaceSourceError, SafeErrorCode
+from src.marketplaces.errors import (
+    MarketplaceSourceError,
+    SafeErrorCode,
+    bounded_retry_after_ms,
+)
 from src.marketplaces.validation import ValidationState, validate_yandex_html
 from src.parsers.base import ParsedProduct
 from src.parsers.utils import (
@@ -176,7 +180,10 @@ class YandexPublicSource:
             ) from exc
         if response.status_code == 404 and not_found_on_404:
             raise NotFoundError('Yandex Market product not found')
-        _raise_for_status(response.status_code)
+        _raise_for_status(
+            response.status_code,
+            response.headers.get('Retry-After'),
+        )
         return response.text
 
 
@@ -189,7 +196,10 @@ def _product_id(item: dict[str, Any]) -> str:
     return product_id
 
 
-def _raise_for_status(status_code: int) -> None:
+def _raise_for_status(
+    status_code: int,
+    retry_after: str | None = None,
+) -> None:
     if status_code == 403:
         raise MarketplaceSourceError(
             SourceOutcome.CHALLENGE,
@@ -199,6 +209,7 @@ def _raise_for_status(status_code: int) -> None:
         raise MarketplaceSourceError(
             SourceOutcome.RATE_LIMITED,
             SafeErrorCode.RATE_LIMITED,
+            retry_after_ms=bounded_retry_after_ms(retry_after),
         )
     if status_code >= 500:
         raise MarketplaceSourceError(
@@ -303,5 +314,6 @@ def _failure_result(
             duration_ms=_duration_ms(started),
             item_count=0,
             error_code=error.error_code,
+            retry_after_ms=error.retry_after_ms,
         ),
     )

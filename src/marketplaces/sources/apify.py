@@ -143,7 +143,12 @@ class ApifySource:
         except _ApifyDisabledError:
             return _result(SourceOutcome.DISABLED, None, started)
         except MarketplaceSourceError as exc:
-            return _failure(exc.outcome, exc.error_code, started)
+            return _failure(
+                exc.outcome,
+                exc.error_code,
+                started,
+                retry_after_ms=exc.retry_after_ms,
+            )
         except ValueError:
             return _failure(
                 SourceOutcome.INVALID_CONFIG,
@@ -297,6 +302,8 @@ def _failure(
     outcome: SourceOutcome,
     error_code: SafeErrorCode,
     started: float,
+    *,
+    retry_after_ms: int | None = None,
 ) -> SourceResult[Any]:
     return SourceResult(
         source=SourceName.APIFY,
@@ -308,5 +315,6 @@ def _failure(
             duration_ms=_duration_ms(started),
             item_count=0,
             error_code=error_code,
+            retry_after_ms=retry_after_ms,
         ),
     )

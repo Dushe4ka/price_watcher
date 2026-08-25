@@ -14,6 +14,7 @@ from src.marketplaces.service import (
     configure_marketplace_runtime,
     start_marketplace_services,
 )
+from src.marketplaces.telemetry import silence_transport_request_logs
 
 
 load_dotenv()
@@ -23,6 +24,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print(f'Приложение запущено! Дата: {datetime.now()}')
+    silence_transport_request_logs()
     configure_marketplace_runtime('api')
     try:
         await start_marketplace_services()

@@ -1,63 +1,57 @@
-"""Live smoke: WB category crawl must return N>0 products with prices.
+"""Gated smoke check: one bounded Wildberries category crawl, safe output only.
 
-Respects WB rate limits. Exit 0 on success, 2 on empty, 1 on hard failure.
+This script performs no network call unless ``LIVE_MARKETPLACE_TESTS=1`` is
+set, and prints only the allowlisted marketplace telemetry: never a product
+identity, title, URL or response body.
 
-Run:
-  python -m scripts.smoke_wb_crawl
-  WB_SMOKE_LIMIT=5 python -m scripts.smoke_wb_crawl
+Run::
+
+    LIVE_MARKETPLACE_TESTS=1 python -m scripts.smoke_wb_crawl
 """
 
 from __future__ import annotations
 
-import asyncio
-import logging
-import os
 import sys
+from collections.abc import Mapping
+from pathlib import Path
 
-from src.crawlers.wildberries import WildberriesCategoryCrawler
+# Importable whether the operator reaches for ``-m`` or a bare script path.
+if str(Path(__file__).resolve().parent.parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+from scripts.live_marketplace_probe import (
+    DEFAULT_SERVICE_FACTORY,
+    ServiceFactory,
+    Writer,
+    main as probe_main,
 )
-logger = logging.getLogger('smoke_wb_crawl')
 
 
-async def main() -> int:
-    limit = int(os.getenv('WB_SMOKE_LIMIT', '5'))
-    crawler = WildberriesCategoryCrawler()
-    result = await crawler.crawl_category(
-        crawl_url='https://www.wildberries.ru/catalog/krasota/aptechnaya-kosmetika',
-        category_slug='beauty',
-        limit=limit,
+MARKETPLACE = 'wildberries'
+OPERATION = 'crawl_category'
+
+
+def main(
+    argv: list[str] | None = None,
+    env: Mapping[str, str] | None = None,
+    *,
+    service_factory: ServiceFactory | None = DEFAULT_SERVICE_FACTORY,
+    writer: Writer = print,
+) -> int:
+    """Delegate to the gated probe runner with this marketplace pinned."""
+    return probe_main(
+        [
+            '--marketplace',
+            MARKETPLACE,
+            '--operation',
+            OPERATION,
+            *(argv or []),
+        ],
+        env,
+        service_factory=service_factory,
+        writer=writer,
     )
-    priced = [
-        pid
-        for pid in result.product_ids
-        if result.pre_parsed.get(pid)
-        and result.pre_parsed[pid].price > 0
-    ]
-    logger.info(
-        'WB smoke: product_ids=%s priced=%s',
-        len(result.product_ids),
-        len(priced),
-    )
-    for pid in priced[:5]:
-        p = result.pre_parsed[pid]
-        logger.info(
-            '  %s | %s | %s RUB | disc=%s',
-            pid,
-            p.title[:60],
-            p.price,
-            p.discount_percent,
-        )
-
-    if not priced:
-        logger.error('FAIL: 0 priced products from WB crawl')
-        return 2
-    logger.info('OK: N=%s priced products', len(priced))
-    return 0
 
 
 if __name__ == '__main__':
-    sys.exit(asyncio.run(main()))
+    sys.exit(main())
