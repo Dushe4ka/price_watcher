@@ -1,8 +1,13 @@
 """``SourceRetryExecutor`` stays the only retry owner in the real stack.
 
-The browser leg of these tests is a real Chromium navigating through the
-production source, so the attempt counts are counted where they actually
-happen: at the fixture server socket.
+The flow under test is the production composition root: a real
+:class:`MarketplaceService` reads the retry configuration, builds one shared
+deadline and wraps every source of the chain itself. Nothing in the harness
+composes a retry of its own, so losing that wiring fails these tests.
+
+The browser leg is a real Chromium navigating through the production source,
+so its attempts are counted where they actually happen: at the fixture
+server socket.
 """
 
 from __future__ import annotations

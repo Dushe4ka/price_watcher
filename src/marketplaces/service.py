@@ -1,16 +1,21 @@
 """Application-facing marketplace operations over configured source chains.
 
-The service owns no retry, no source selection and no challenge handling of
-its own: it builds the ordered :class:`SourceCall` sequence for one
-marketplace and hands it to :func:`execute_fallback`.
+The service is the retry composition point: it builds the ordered
+:class:`SourceCall` sequence for one marketplace, wraps every call in the
+single :class:`SourceRetryExecutor` owning internal transport retries, binds
+them all to one shared :class:`OperationDeadline`, and hands the sequence to
+:func:`execute_fallback`, which still runs each source exactly once. Source
+selection and challenge handling remain owned elsewhere.
 """
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
-from src.core.config import RuntimeRole
+from src.core.config import RuntimeRole, Settings
 from src.core.config import settings as default_settings
 from src.crawlers.base import CategoryCrawlResult
 from src.marketplaces.contracts import (
@@ -20,6 +25,7 @@ from src.marketplaces.contracts import (
     MarketplaceResult,
     ProductRequest,
     SearchRequest,
+    SourceName,
     SourceResult,
 )
 from src.marketplaces.fallback import SourceCall, execute_fallback
@@ -27,6 +33,13 @@ from src.marketplaces.registry import (
     MARKETPLACES,
     MarketplaceSourceRegistry,
     build_default_registry,
+)
+from src.marketplaces.retry import (
+    Clock,
+    OperationDeadline,
+    RetryPolicy,
+    Sleep,
+    SourceRetryExecutor,
 )
 from src.parsers.base import ParsedProduct
 
@@ -48,11 +61,19 @@ class MarketplaceService:
         self,
         marketplace: MarketplaceName,
         registry: MarketplaceSourceRegistry,
+        *,
+        settings: Settings = default_settings,
+        sleep: Sleep = asyncio.sleep,
+        clock: Clock = time.monotonic,
     ) -> None:
         if marketplace not in MARKETPLACES:
             raise ValueError(f'unsupported marketplace: {marketplace}')
         self._marketplace: MarketplaceName = marketplace
         self._registry = registry
+        self._settings = settings
+        self._sleep = sleep
+        self._clock = clock
+        self._executor = SourceRetryExecutor()
 
     @property
     def marketplace(self) -> MarketplaceName:
@@ -102,11 +123,62 @@ class MarketplaceService:
         request: Request,
         invoke: SourceInvoke,
     ) -> MarketplaceResult[Any]:
+        deadline = OperationDeadline.from_timeout_ms(
+            self._settings.marketplace_total_timeout_sec * 1000,
+            self._clock,
+        )
         calls = tuple(
-            SourceCall(source=name, invoke=_bind(invoke, source, request))
+            self._retrying_call(name, source, request, invoke, deadline)
             for name, source in self._registry.sources_for(self._marketplace)
         )
         return await execute_fallback(self._marketplace, operation, calls)
+
+    def _retrying_call(
+        self,
+        name: SourceName,
+        source: Any,
+        request: Request,
+        invoke: SourceInvoke,
+        deadline: OperationDeadline,
+    ) -> SourceCall[Any]:
+        """Wrap one source call in the executor owning transport retries.
+
+        ``execute_fallback`` still invokes the returned call exactly once;
+        the bounded retry happens inside that single invocation, against the
+        deadline shared by every source in the chain.
+        """
+        inner = SourceCall(
+            source=name,
+            invoke=_bind(invoke, source, request),
+        )
+        policy = self._retry_policy(name)
+
+        async def call() -> SourceResult[Any]:
+            return await self._executor.run(
+                inner,
+                policy,
+                self._sleep,
+                self._clock,
+                deadline,
+            )
+
+        return SourceCall(source=name, invoke=call)
+
+    def _retry_policy(self, name: SourceName) -> RetryPolicy:
+        """Return the transport retry budget configured for one source.
+
+        The Apify source performs exactly one attempt by construction, so
+        its policy makes the executor a transparent pass-through that still
+        honours the shared deadline and reports a measured attempt count.
+        """
+        if name is SourceName.APIFY:
+            return RetryPolicy(max_attempts=1)
+        settings = self._settings
+        return RetryPolicy(
+            max_attempts=settings.marketplace_retry_max_attempts,
+            base_delay_ms=settings.marketplace_retry_base_delay_ms,
+            max_delay_ms=settings.marketplace_retry_max_delay_ms,
+        )
 
 
 def configure_marketplace_runtime(role: RuntimeRole) -> None:

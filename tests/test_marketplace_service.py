@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import fields
+from typing import Any
 from unittest.mock import patch
 
 from src.marketplaces.contracts import (
@@ -24,13 +25,18 @@ from src.marketplaces.service import (
     start_marketplace_services,
 )
 from tests.marketplace_service_fakes import (
+    FakeClock,
+    RecordingSleep,
     StubRegistry,
     StubSource,
     challenge,
     crawl_result,
     empty,
     parsed_product,
+    rate_limited,
+    retry_settings,
     success,
+    transport_error,
 )
 
 
@@ -39,11 +45,21 @@ def make_service(
     chain: tuple[SourceName, ...],
     sources: dict[SourceName, StubSource],
     marketplace: str = 'ozon',
+    settings: Any = None,
+    sleep: Any = None,
+    clock: Any = None,
 ) -> tuple[MarketplaceService, StubRegistry]:
     registry = StubRegistry(
         tuple((name, sources[name]) for name in chain),
     )
-    return MarketplaceService(marketplace, registry), registry
+    extra: dict[str, Any] = {}
+    if settings is not None:
+        extra['settings'] = settings
+    if sleep is not None:
+        extra['sleep'] = sleep
+    if clock is not None:
+        extra['clock'] = clock
+    return MarketplaceService(marketplace, registry, **extra), registry
 
 
 class ServiceFallbackTests(unittest.IsolatedAsyncioTestCase):
@@ -137,6 +153,182 @@ class ServiceFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.selected_source)
         self.assertIsNone(result.value)
         self.assertEqual(SourceOutcome.CHALLENGE, result.outcome)
+
+
+class ServiceRetryWiringTests(unittest.IsolatedAsyncioTestCase):
+    """The service composes ``SourceRetryExecutor`` around every source."""
+
+    async def test_transport_error_is_retried_inside_one_source(self) -> None:
+        sleep = RecordingSleep()
+        public = StubSource(
+            SourceName.PUBLIC,
+            transport_error(SourceName.PUBLIC),
+            transport_error(SourceName.PUBLIC),
+        )
+        service, _ = make_service(
+            chain=(SourceName.PUBLIC,),
+            sources={SourceName.PUBLIC: public},
+            settings=retry_settings(),
+            sleep=sleep,
+            clock=FakeClock(),
+        )
+
+        result = await service.parse_product(ProductRequest('9000001'))
+
+        self.assertEqual(2, len(public.requests))
+        self.assertEqual(1, len(result.attempts))
+        self.assertEqual(2, result.attempts[0].transport_attempts)
+        self.assertEqual([0.25], sleep.delays)
+
+    async def test_rate_limited_is_retried_as_a_transport_blip(self) -> None:
+        browser = StubSource(
+            SourceName.BROWSER,
+            rate_limited(SourceName.BROWSER),
+            rate_limited(SourceName.BROWSER),
+        )
+        service, _ = make_service(
+            chain=(SourceName.BROWSER,),
+            sources={SourceName.BROWSER: browser},
+            settings=retry_settings(),
+            sleep=RecordingSleep(),
+            clock=FakeClock(),
+        )
+
+        result = await service.crawl_category(
+            CategoryRequest(category_slug='beauty', limit=5),
+        )
+
+        self.assertEqual(2, len(browser.requests))
+        self.assertEqual(2, result.attempts[0].transport_attempts)
+
+    async def test_a_recovered_source_never_falls_back(self) -> None:
+        product = parsed_product()
+        apify = StubSource(
+            SourceName.APIFY,
+            success(SourceName.APIFY, product),
+        )
+        public = StubSource(
+            SourceName.PUBLIC,
+            transport_error(SourceName.PUBLIC),
+            success(SourceName.PUBLIC, product),
+        )
+        service, _ = make_service(
+            chain=(SourceName.PUBLIC, SourceName.APIFY),
+            sources={SourceName.PUBLIC: public, SourceName.APIFY: apify},
+            settings=retry_settings(),
+            sleep=RecordingSleep(),
+            clock=FakeClock(),
+        )
+
+        result = await service.parse_product(ProductRequest('9000001'))
+
+        self.assertEqual(SourceName.PUBLIC, result.selected_source)
+        self.assertEqual([], apify.requests)
+        self.assertEqual(2, result.attempts[0].transport_attempts)
+
+    async def test_apify_keeps_its_single_attempt_policy(self) -> None:
+        sleep = RecordingSleep()
+        apify = StubSource(
+            SourceName.APIFY,
+            transport_error(SourceName.APIFY),
+        )
+        service, _ = make_service(
+            chain=(SourceName.APIFY,),
+            sources={SourceName.APIFY: apify},
+            settings=retry_settings(),
+            sleep=sleep,
+            clock=FakeClock(),
+        )
+
+        result = await service.parse_product(ProductRequest('9000001'))
+
+        self.assertEqual(1, len(apify.requests))
+        self.assertEqual(1, result.attempts[0].transport_attempts)
+        self.assertEqual([], sleep.delays)
+
+    async def test_retry_budget_comes_from_configuration(self) -> None:
+        sleep = RecordingSleep()
+        public = StubSource(
+            SourceName.PUBLIC,
+            transport_error(SourceName.PUBLIC),
+        )
+        service, _ = make_service(
+            chain=(SourceName.PUBLIC,),
+            sources={SourceName.PUBLIC: public},
+            settings=retry_settings(max_attempts=1),
+            sleep=sleep,
+            clock=FakeClock(),
+        )
+
+        result = await service.parse_product(ProductRequest('9000001'))
+
+        self.assertEqual(1, len(public.requests))
+        self.assertEqual(1, result.attempts[0].transport_attempts)
+        self.assertEqual([], sleep.delays)
+
+    async def test_retry_delay_comes_from_configuration(self) -> None:
+        sleep = RecordingSleep()
+        public = StubSource(
+            SourceName.PUBLIC,
+            transport_error(SourceName.PUBLIC),
+            transport_error(SourceName.PUBLIC),
+        )
+        service, _ = make_service(
+            chain=(SourceName.PUBLIC,),
+            sources={SourceName.PUBLIC: public},
+            settings=retry_settings(base_delay_ms=10, max_delay_ms=20),
+            sleep=sleep,
+            clock=FakeClock(),
+        )
+
+        await service.parse_product(ProductRequest('9000001'))
+
+        self.assertEqual([0.01], sleep.delays)
+
+    async def test_one_deadline_is_shared_by_the_whole_chain(self) -> None:
+        sleep = RecordingSleep()
+        public = StubSource(
+            SourceName.PUBLIC,
+            transport_error(SourceName.PUBLIC),
+        )
+        apify = StubSource(
+            SourceName.APIFY,
+            success(SourceName.APIFY, parsed_product()),
+        )
+        service, _ = make_service(
+            chain=(SourceName.PUBLIC, SourceName.APIFY),
+            sources={SourceName.PUBLIC: public, SourceName.APIFY: apify},
+            settings=retry_settings(total_timeout_sec=30),
+            sleep=sleep,
+            clock=FakeClock(step=20.0),
+        )
+
+        result = await service.parse_product(ProductRequest('9000001'))
+
+        self.assertEqual(1, len(public.requests))
+        self.assertEqual([], apify.requests)
+        self.assertEqual(SourceOutcome.TRANSPORT_ERROR, result.outcome)
+        self.assertEqual(0, result.attempts[1].transport_attempts)
+        self.assertEqual([], sleep.delays)
+
+    async def test_challenge_is_never_retried(self) -> None:
+        browser = StubSource(
+            SourceName.BROWSER,
+            challenge(SourceName.BROWSER),
+        )
+        service, _ = make_service(
+            chain=(SourceName.BROWSER,),
+            sources={SourceName.BROWSER: browser},
+            settings=retry_settings(),
+            sleep=RecordingSleep(),
+            clock=FakeClock(),
+        )
+
+        result = await service.parse_product(ProductRequest('9000001'))
+
+        self.assertEqual(1, len(browser.requests))
+        self.assertEqual(SourceOutcome.CHALLENGE, result.outcome)
+        self.assertEqual(1, result.attempts[0].transport_attempts)
 
 
 class CategoryTrustBoundaryTests(unittest.TestCase):

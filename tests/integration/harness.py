@@ -34,7 +34,7 @@ import os
 import tempfile
 import time
 import unittest
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,7 +55,6 @@ from src.captcha.models import ChallengeDetection, ChallengeType
 from src.core.browser_proxy import STEALTH_INIT_SCRIPT, chromium_runtime_args
 from src.marketplaces.contracts import (
     MarketplaceName,
-    MarketplaceOperation,
     MarketplaceResult,
     ProductRequest,
     SourceAttempt,
@@ -64,18 +63,14 @@ from src.marketplaces.contracts import (
     SourceResult,
 )
 from src.marketplaces.errors import SafeErrorCode
-from src.marketplaces.fallback import SourceCall, execute_fallback
-from src.marketplaces.retry import (
-    OperationDeadline,
-    RetryPolicy,
-    SourceRetryExecutor,
-)
+from src.marketplaces.service import MarketplaceService
 from src.marketplaces.sources.browser import YandexMarketBrowserSource
 from tests.integration.fixture_server import (
     UNSAFE_REDIRECT_HOST,
     FixtureServer,
     fixture_server,
 )
+from tests.marketplace_service_fakes import StubRegistry, retry_settings
 
 
 # The controlled topology deliberately mirrors production hosts exactly.
@@ -354,7 +349,12 @@ async def run_controlled_retry_flow(
     profile_dir: Path,
     server: FixtureServer | None = None,
 ) -> tuple[dict[str, int], MarketplaceResult[Any]]:
-    """Run a full fallback chain and count attempts per source exactly."""
+    """Run the real service over a full chain, counting attempts exactly.
+
+    The chain is driven by the production :class:`MarketplaceService`, whose
+    own composition owns every retry; the browser attempts are counted at
+    the fixture server socket.
+    """
     if server is not None:
         return await _retry_flow(server, max_attempts, profile_dir)
     async with fixture_server('transport-error') as owned:
@@ -494,13 +494,17 @@ async def _leased_page(
 
 @dataclass(slots=True)
 class _CountingSource:
-    """A source that only records how many times it was invoked."""
+    """A source adapter that only records how many times it was called."""
 
     source: SourceName
     calls: list[str] = field(default_factory=list)
 
-    async def invoke(self) -> SourceResult[Any]:
+    async def parse_product(
+        self,
+        request: ProductRequest,
+    ) -> SourceResult[Any]:
         """Return a retriable transport failure and count the attempt."""
+        del request
         self.calls.append(self.source.value)
         return SourceResult(
             source=self.source,
@@ -521,87 +525,49 @@ async def _retry_flow(
     max_attempts: int,
     profile_dir: Path,
 ) -> tuple[dict[str, int], MarketplaceResult[Any]]:
-    counters = {'public': 0, 'browser': 0, 'apify': 0}
     public = _CountingSource(SourceName.PUBLIC)
     apify = _CountingSource(SourceName.APIFY)
-    executor = SourceRetryExecutor()
-    # Task 7 gives the Apify source no internal retry of its own, so its
-    # policy is a single attempt while the other sources keep their own,
-    # independent budget. Zero delay keeps the suite free of wall-clock
-    # sleeps without weakening the count.
-    retriable = RetryPolicy(
+    # The real production composition root is what is under test here, so
+    # the chain is handed to ``MarketplaceService`` exactly as the registry
+    # hands it over and nothing here wires a retry of its own. Only the
+    # retry configuration is overridden: ``max_attempts`` is the variable
+    # under test and zero delay keeps the suite free of wall-clock sleeps
+    # without weakening the count.
+    settings = retry_settings(
         max_attempts=max_attempts,
         base_delay_ms=0,
         max_delay_ms=0,
+        total_timeout_sec=60,
     )
-    single = RetryPolicy(max_attempts=1, base_delay_ms=0, max_delay_ms=0)
-    deadline = OperationDeadline.from_timeout_ms(60_000, time.monotonic)
 
     async with controlled_stack(
         server,
         profile_dir=profile_dir,
         total_timeout_sec=10.0,
     ) as (source, _router, _handler):
-
-        async def browser_invoke() -> SourceResult[Any]:
-            counters['browser'] += 1
-            return await source.parse_product(
-                ProductRequest(product_id=DEFAULT_PRODUCT_ID),
-            )
-
-        calls = (
-            _retry_call(
-                SourceName.PUBLIC,
-                public.invoke,
-                executor,
-                retriable,
-                deadline,
-            ),
-            _retry_call(
-                SourceName.BROWSER,
-                browser_invoke,
-                executor,
-                retriable,
-                deadline,
-            ),
-            _retry_call(
-                SourceName.APIFY,
-                apify.invoke,
-                executor,
-                single,
-                deadline,
+        registry = StubRegistry(
+            (
+                (SourceName.PUBLIC, public),
+                (SourceName.BROWSER, source),
+                (SourceName.APIFY, apify),
             ),
         )
-        result = await execute_fallback(
+        service = MarketplaceService(
             DEFAULT_MARKETPLACE,
-            MarketplaceOperation.PARSE_PRODUCT,
-            calls,
+            registry,
+            settings=settings,
         )
+        result = await service.parse_product(
+            ProductRequest(product_id=DEFAULT_PRODUCT_ID),
+        )
+        browser_requests = server.count()
 
-    counters['public'] = len(public.calls)
-    counters['apify'] = len(apify.calls)
+    counters = {
+        'public': len(public.calls),
+        'browser': browser_requests,
+        'apify': len(apify.calls),
+    }
     return counters, result
-
-
-def _retry_call(
-    source: SourceName,
-    invoke: Callable[[], Awaitable[SourceResult[Any]]],
-    executor: SourceRetryExecutor,
-    policy: RetryPolicy,
-    deadline: OperationDeadline,
-) -> SourceCall[Any]:
-    inner = SourceCall(source=source, invoke=invoke)
-
-    async def run() -> SourceResult[Any]:
-        return await executor.run(
-            inner,
-            policy,
-            asyncio.sleep,
-            time.monotonic,
-            deadline,
-        )
-
-    return SourceCall(source=source, invoke=run)
 
 
 def _marketplace_product_url(marketplace: MarketplaceName) -> str:

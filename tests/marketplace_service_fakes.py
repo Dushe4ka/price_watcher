@@ -6,6 +6,8 @@ from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any
 
+from src.core.config import Settings
+from src.core.config import settings as default_settings
 from src.crawlers.base import CategoryCrawlResult
 from src.marketplaces.contracts import (
     MarketplaceName,
@@ -79,6 +81,71 @@ def challenge(source: SourceName) -> SourceResult[Any]:
     )
 
 
+def transport_error(source: SourceName) -> SourceResult[Any]:
+    """Return one retriable transport failure result."""
+    return source_failure(
+        source,
+        SourceOutcome.TRANSPORT_ERROR,
+        SafeErrorCode.TRANSPORT_FAILED,
+    )
+
+
+def rate_limited(source: SourceName) -> SourceResult[Any]:
+    """Return one retriable rate limited failure result."""
+    return source_failure(
+        source,
+        SourceOutcome.RATE_LIMITED,
+        SafeErrorCode.RATE_LIMITED,
+    )
+
+
+def retry_settings(
+    *,
+    max_attempts: int = 2,
+    base_delay_ms: int = 250,
+    max_delay_ms: int = 1000,
+    total_timeout_sec: int = 30,
+) -> Settings:
+    """Return real settings with only the retry knobs overridden."""
+    return default_settings.model_copy(
+        update={
+            'marketplace_retry_max_attempts': max_attempts,
+            'marketplace_retry_base_delay_ms': base_delay_ms,
+            'marketplace_retry_max_delay_ms': max_delay_ms,
+            'marketplace_total_timeout_sec': total_timeout_sec,
+        },
+    )
+
+
+class RecordingSleep:
+    """Async sleep replacement recording every requested delay."""
+
+    def __init__(self) -> None:
+        self.delays: list[float] = []
+
+    async def __call__(self, delay: float) -> None:
+        self.delays.append(delay)
+
+
+class FakeClock:
+    """Monotonic-shaped clock advancing a fixed step per reading."""
+
+    def __init__(self, start: float = 0.0, step: float = 0.0) -> None:
+        self._now = start
+        self._step = step
+        self.readings = 0
+
+    def __call__(self) -> float:
+        self.readings += 1
+        now = self._now
+        self._now += self._step
+        return now
+
+    def advance(self, delta: float) -> None:
+        """Move the clock forward without consuming a reading."""
+        self._now += delta
+
+
 class StubSource:
     """Source adapter returning scripted results per marketplace operation."""
 
@@ -119,11 +186,15 @@ class StubSource:
 
 
 class StubRegistry:
-    """Registry stub exposing a fixed chain and a counted close."""
+    """Registry stub exposing a fixed chain and a counted close.
+
+    The chain entries are only duck typed as source adapters, so a real
+    production source can stand in one slot while stubs fill the others.
+    """
 
     def __init__(
         self,
-        chain: Sequence[tuple[SourceName, StubSource]],
+        chain: Sequence[tuple[SourceName, Any]],
         *,
         start_error: Exception | None = None,
     ) -> None:
@@ -149,7 +220,7 @@ class StubRegistry:
     def sources_for(
         self,
         marketplace: MarketplaceName,
-    ) -> tuple[tuple[SourceName, StubSource], ...]:
+    ) -> tuple[tuple[SourceName, Any], ...]:
         del marketplace
         if self.closed:
             raise RuntimeError('registry is closed')
