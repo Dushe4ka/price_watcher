@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import unittest
 from typing import Any
+from unittest.mock import patch
 
+from scripts import live_marketplace_probe as probe_module
 from scripts.live_marketplace_probe import (
     DEFAULT_SERVICE_FACTORY,
     EXIT_DISABLED,
@@ -14,6 +16,7 @@ from scripts.live_marketplace_probe import (
     EXIT_USAGE,
     LIVE_GATE_ENV,
     LiveProbeDisabled,
+    ProbeInputError,
     assert_live_tests_enabled,
     main,
     parse_marketplace,
@@ -207,20 +210,107 @@ class RunOneProbeTests(unittest.IsolatedAsyncioTestCase):
     async def test_direct_call_still_refuses_to_compose_a_live_chain(
         self,
     ) -> None:
+        # ``crawl_category`` with no slug is the interesting case: defaulting
+        # the slug reads the categories configuration, which imports
+        # application settings, so it must not run before the gate either.
+        operations = (
+            MarketplaceOperation.SEARCH_PRODUCTS,
+            MarketplaceOperation.CRAWL_CATEGORY,
+        )
+        for operation in operations:
+            with self.subTest(operation=operation.value):
+                lines: list[str] = []
+                original = os.environ.pop(LIVE_GATE_ENV, None)
+                try:
+                    code = await run_one_probe(
+                        'ozon',
+                        operation,
+                        query='probe',
+                        writer=lines.append,
+                    )
+                finally:
+                    if original is not None:
+                        os.environ[LIVE_GATE_ENV] = original
+                self.assertEqual(EXIT_DISABLED, code)
+                self.assertIn(LIVE_GATE_ENV, '\n'.join(lines))
+
+    async def test_gate_precedes_any_configuration_load(self) -> None:
+        """An ungated probe must not build a request, let alone read config."""
+        def exploding_build_request(*args: Any, **kwargs: Any) -> Any:
+            self.fail('probe built a request before checking the live gate')
+
+        def exploding_slug(marketplace: str) -> Any:
+            self.fail('probe loaded configuration before checking the gate')
+
         lines: list[str] = []
         original = os.environ.pop(LIVE_GATE_ENV, None)
         try:
-            code = await run_one_probe(
-                'ozon',
-                MarketplaceOperation.SEARCH_PRODUCTS,
-                query='probe',
-                writer=lines.append,
-            )
+            with (
+                patch.object(
+                    probe_module,
+                    '_build_request',
+                    exploding_build_request,
+                ),
+                patch.object(
+                    probe_module,
+                    '_first_configured_slug',
+                    exploding_slug,
+                ),
+            ):
+                code = await run_one_probe(
+                    'ozon',
+                    MarketplaceOperation.CRAWL_CATEGORY,
+                    writer=lines.append,
+                )
         finally:
             if original is not None:
                 os.environ[LIVE_GATE_ENV] = original
         self.assertEqual(EXIT_DISABLED, code)
         self.assertIn(LIVE_GATE_ENV, '\n'.join(lines))
+
+    async def test_config_failure_is_rejected_without_its_message(
+        self,
+    ) -> None:
+        """A pydantic ``ValidationError`` is a ``ValueError`` carrying env."""
+        def leaking_slug(marketplace: str) -> Any:
+            raise ValueError(
+                f'1 validation error for Settings\n  input_value={SECRET}',
+            )
+
+        lines: list[str] = []
+        with patch.object(
+            probe_module,
+            '_first_configured_slug',
+            leaking_slug,
+        ):
+            code = await run_one_probe(
+                'ozon',
+                MarketplaceOperation.CRAWL_CATEGORY,
+                service_factory=ExplodingFactory(self),
+                writer=lines.append,
+            )
+        output = '\n'.join(lines)
+        self.assertEqual(EXIT_USAGE, code)
+        self.assertNotIn(SECRET, output)
+        self.assertIn('ValueError', output)
+
+    async def test_curated_usage_messages_are_still_printed(self) -> None:
+        lines: list[str] = []
+        code = await run_one_probe(
+            'ozon',
+            MarketplaceOperation.PARSE_PRODUCT,
+            service_factory=ExplodingFactory(self),
+            writer=lines.append,
+        )
+        self.assertEqual(EXIT_USAGE, code)
+        self.assertIn('--product-id', '\n'.join(lines))
+
+    def test_curated_probe_input_errors_are_value_errors(self) -> None:
+        self.assertTrue(issubclass(ProbeInputError, ValueError))
+        with self.assertRaises(ProbeInputError):
+            parse_marketplace(SECRET)
+        with self.assertRaises(ProbeInputError):
+            parse_operation(SECRET)
 
     async def test_parse_probe_requires_a_product_id(self) -> None:
         code = await run_one_probe(
@@ -270,6 +360,39 @@ class MainTests(unittest.TestCase):
         )
         self.assertEqual(EXIT_USAGE, code)
         self.assertNotIn(SECRET, '\n'.join(lines))
+
+    def test_main_input_rejection_hides_raw_exception_messages(self) -> None:
+        """``parse_marketplace`` is not the only source of a ``ValueError``."""
+        def leaking_parse(value: str) -> Any:
+            raise ValueError(
+                f'1 validation error for Settings\n  input_value={SECRET}',
+            )
+
+        lines: list[str] = []
+        with patch.object(probe_module, 'parse_marketplace', leaking_parse):
+            code = main(
+                ['--marketplace', 'ozon', '--operation', 'search_products'],
+                env=dict(GATE_ON),
+                service_factory=ExplodingFactory(self),
+                writer=lines.append,
+            )
+        output = '\n'.join(lines)
+        self.assertEqual(EXIT_USAGE, code)
+        self.assertNotIn(SECRET, output)
+        self.assertIn('ValueError', output)
+
+    def test_main_still_names_the_valid_options_on_a_bad_input(self) -> None:
+        lines: list[str] = []
+        code = main(
+            ['--marketplace', SECRET, '--operation', 'search_products'],
+            env=dict(GATE_ON),
+            service_factory=ExplodingFactory(self),
+            writer=lines.append,
+        )
+        output = '\n'.join(lines)
+        self.assertEqual(EXIT_USAGE, code)
+        self.assertIn('wildberries', output)
+        self.assertNotIn(SECRET, output)
 
     def test_main_runs_one_bounded_probe_when_gated_on(self) -> None:
         service = RecordingService()

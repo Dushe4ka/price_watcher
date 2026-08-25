@@ -17,6 +17,10 @@ import logging
 import os
 
 from src.crawlers.ozon import OzonCategoryCrawler
+from src.marketplaces.telemetry import (
+    safe_exception_label,
+    silence_transport_request_logs,
+)
 from src.ozon.client import ozon_client
 from src.services.categories_loader import load_categories_config
 
@@ -24,6 +28,9 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s %(name)s: %(message)s',
 )
+# ``basicConfig(INFO)`` would otherwise let ``httpx`` log a request line
+# carrying the full marketplace URL. This loop runs unattended, forever.
+silence_transport_request_logs()
 logger = logging.getLogger('age_ozon_profile')
 
 
@@ -54,8 +61,17 @@ async def crawl_once(crawler: OzonCategoryCrawler) -> None:
                 len(result.product_ids),
                 priced,
             )
-        except Exception:
-            logger.exception('Ozon %s crawl failed', category.slug)
+        except Exception as exc:
+            # Never ``logger.exception`` here: a Playwright launch or proxy
+            # failure propagates out of the Ozon session with the proxy URL —
+            # credentials included — inside its message and its chained
+            # traceback. The failure class plus the category is the most that
+            # can be logged safely.
+            logger.error(
+                'Ozon %s crawl failed (%s)',
+                category.slug,
+                safe_exception_label(exc),
+            )
 
 
 async def main() -> None:

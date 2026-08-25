@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 import unittest
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 from src.marketplaces.contracts import (
     MarketplaceOperation,
@@ -309,6 +312,78 @@ class LegacyLogLeakTests(unittest.IsolatedAsyncioTestCase):
             settings.telegram_channel_id = original
         self.assertIsNone(posted)
         self.assertNotIn(SECRET, '\n'.join(captured.output))
+
+
+class _ExplodingCrawler:
+    """A crawler whose failure quotes a proxy URL, as Playwright's does."""
+
+    def __init__(self, message: str) -> None:
+        self._message = message
+        self.calls = 0
+
+    async def crawl_category(self, **kwargs: Any) -> Any:
+        self.calls += 1
+        raise RuntimeError(self._message)
+
+
+def _one_ozon_category() -> Any:
+    return SimpleNamespace(
+        categories=[
+            SimpleNamespace(
+                slug='beauty',
+                marketplaces=[
+                    SimpleNamespace(
+                        marketplace='ozon',
+                        crawl_url='https://www.ozon.ru/category/beauty/',
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+class AgeOzonProfileLogLeakTests(unittest.IsolatedAsyncioTestCase):
+    """The unattended profile-aging loop logs like the rest of the project."""
+
+    def test_import_silences_transport_request_logs(self) -> None:
+        from scripts import age_ozon_profile
+
+        noisy = logging.getLogger('httpx')
+        original = noisy.level
+        noisy.setLevel(logging.INFO)
+        try:
+            with patch('logging.basicConfig'):
+                importlib.reload(age_ozon_profile)
+            self.assertFalse(noisy.isEnabledFor(logging.INFO))
+            self.assertTrue(noisy.isEnabledFor(logging.WARNING))
+        finally:
+            noisy.setLevel(original)
+
+    async def test_crawl_failure_hides_the_proxy_url(self) -> None:
+        from scripts import age_ozon_profile
+
+        crawler = _ExplodingCrawler(
+            f'Chromium launch failed for proxy {PROXY_SENTINEL}',
+        )
+        with patch.object(
+            age_ozon_profile,
+            'load_categories_config',
+            _one_ozon_category,
+        ):
+            with self.assertLogs(
+                'age_ozon_profile',
+                level=logging.ERROR,
+            ) as captured:
+                await age_ozon_profile.crawl_once(crawler)
+
+        output = '\n'.join(captured.output)
+        self.assertEqual(1, crawler.calls)
+        self.assertNotIn(SECRET, output)
+        self.assertNotIn(PROXY_SENTINEL, output)
+        self.assertNotIn('Traceback', output)
+        # Observability is kept: the category and the failure class remain.
+        self.assertIn('beauty', output)
+        self.assertIn('RuntimeError', output)
 
 
 if __name__ == '__main__':

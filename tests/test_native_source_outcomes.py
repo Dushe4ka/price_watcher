@@ -37,9 +37,15 @@ def _fixture(name: str) -> str:
 def _client_factory(
     status_code: int,
     body: str,
+    headers: dict[str, str] | None = None,
 ):
     async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status_code, text=body, request=request)
+        return httpx.Response(
+            status_code,
+            text=body,
+            headers=headers,
+            request=request,
+        )
 
     def factory(**kwargs: object) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -137,6 +143,49 @@ class YandexPublicSourceTests(unittest.IsolatedAsyncioTestCase):
             SafeErrorCode.RATE_LIMITED,
             result.attempt.error_code,
         )
+        # No ``Retry-After`` was sent, so there is no cooldown hint to carry.
+        self.assertIsNone(result.attempt.retry_after_ms)
+
+    async def test_rate_limit_carries_the_retry_after_header(self) -> None:
+        source = YandexPublicSource(
+            client_factory=_client_factory(
+                429,
+                'synthetic rate limit',
+                headers={'Retry-After': '12'},
+            ),
+        )
+        result = await source.search_products(
+            SearchRequest(query='synthetic', limit=2),
+        )
+        self.assertEqual(SourceOutcome.RATE_LIMITED, result.outcome)
+        self.assertEqual(12_000, result.attempt.retry_after_ms)
+
+    async def test_rate_limit_clamps_an_absurd_retry_after(self) -> None:
+        source = YandexPublicSource(
+            client_factory=_client_factory(
+                429,
+                'synthetic rate limit',
+                headers={'Retry-After': '99999'},
+            ),
+        )
+        result = await source.search_products(
+            SearchRequest(query='synthetic', limit=2),
+        )
+        self.assertEqual(300_000, result.attempt.retry_after_ms)
+
+    async def test_rate_limit_discards_a_non_numeric_retry_after(self) -> None:
+        source = YandexPublicSource(
+            client_factory=_client_factory(
+                429,
+                'synthetic rate limit',
+                headers={'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT'},
+            ),
+        )
+        result = await source.search_products(
+            SearchRequest(query='synthetic', limit=2),
+        )
+        self.assertEqual(SourceOutcome.RATE_LIMITED, result.outcome)
+        self.assertIsNone(result.attempt.retry_after_ms)
 
     async def test_product_structural_empty_is_not_found(self) -> None:
         source = YandexPublicSource(
@@ -218,6 +267,52 @@ class _OzonSession:
         self.request = _OzonRequest()
         self.page = SimpleNamespace(
             context=SimpleNamespace(request=self.request),
+        )
+
+    async def ensure_page(self) -> object:
+        return self.page
+
+    def note_block(self) -> None:
+        pass
+
+    def note_success(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+    async def rotate_and_restart(self) -> None:
+        pass
+
+
+class _OzonRateLimitedResponse:
+    """Playwright's ``APIResponse`` exposes lowercased header names."""
+
+    def __init__(self, headers: dict[str, str]) -> None:
+        self.status = 429
+        self.headers = headers
+
+    async def text(self) -> str:
+        return '{"synthetic": "rate limited"}'
+
+
+class _OzonRateLimitedSession:
+    def __init__(self, headers: dict[str, str]) -> None:
+        self.calls = 0
+        session = self
+
+        class _Request:
+            async def get(
+                self,
+                url: str,
+                headers: object,
+            ) -> _OzonRateLimitedResponse:
+                session.calls += 1
+                return _OzonRateLimitedResponse(dict(session.headers))
+
+        self.headers = headers
+        self.page = SimpleNamespace(
+            context=SimpleNamespace(request=_Request()),
         )
 
     async def ensure_page(self) -> object:
@@ -340,6 +435,28 @@ class NativeClientFailureTests(unittest.IsolatedAsyncioTestCase):
             len(OZON_PAGE_JSON_URLS),
             session.request.calls,
         )
+
+    async def test_ozon_rate_limit_carries_the_retry_after_header(
+        self,
+    ) -> None:
+        session = _OzonRateLimitedSession({'retry-after': '9'})
+        client = OzonClient(session=session)
+
+        with self.assertRaises(MarketplaceSourceError) as raised:
+            await client.fetch_payload('/synthetic/')
+
+        self.assertEqual(SourceOutcome.RATE_LIMITED, raised.exception.outcome)
+        self.assertEqual(9_000, raised.exception.retry_after_ms)
+
+    async def test_ozon_rate_limit_without_a_header_has_no_hint(self) -> None:
+        session = _OzonRateLimitedSession({})
+        client = OzonClient(session=session)
+
+        with self.assertRaises(MarketplaceSourceError) as raised:
+            await client.fetch_payload('/synthetic/')
+
+        self.assertEqual(SourceOutcome.RATE_LIMITED, raised.exception.outcome)
+        self.assertIsNone(raised.exception.retry_after_ms)
 
     async def test_wb_challenge_raises_typed_error_without_retry(self) -> None:
         session = _WBSession()

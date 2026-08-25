@@ -197,6 +197,66 @@ class ApifyClientTests(unittest.IsolatedAsyncioTestCase):
                         300,
                     )
 
+    async def test_rate_limit_error_carries_bounded_retry_after_ms(
+        self,
+    ) -> None:
+        from src.marketplaces.apify_client import ApifyClient
+
+        cases = (
+            ('7', 7_000),
+            ('300', 300_000),
+            ('99999', 300_000),
+            ('Wed, 21 Oct 2026 07:28:00 GMT', None),
+        )
+        for header, expected_ms in cases:
+            with self.subTest(header=header):
+                async def handler(request: httpx.Request) -> httpx.Response:
+                    return httpx.Response(
+                        429,
+                        headers={'Retry-After': header},
+                        request=request,
+                    )
+
+                client = ApifyClient(
+                    make_settings(),
+                    client_factory(httpx.MockTransport(handler)),
+                )
+                with self.assertRaises(MarketplaceSourceError) as raised:
+                    await client.run_actor(
+                        'ozon',
+                        MarketplaceOperation.SEARCH_PRODUCTS,
+                        SearchRequest(query='synthetic query', limit=3),
+                    )
+
+                self.assertEqual(
+                    SourceOutcome.RATE_LIMITED,
+                    raised.exception.outcome,
+                )
+                self.assertEqual(
+                    expected_ms,
+                    raised.exception.retry_after_ms,
+                )
+
+    async def test_rate_limit_without_a_header_has_no_hint(self) -> None:
+        from src.marketplaces.apify_client import ApifyClient
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(429, request=request)
+
+        client = ApifyClient(
+            make_settings(),
+            client_factory(httpx.MockTransport(handler)),
+        )
+        with self.assertRaises(MarketplaceSourceError) as raised:
+            await client.run_actor(
+                'ozon',
+                MarketplaceOperation.SEARCH_PRODUCTS,
+                SearchRequest(query='synthetic query', limit=3),
+            )
+
+        self.assertEqual(SourceOutcome.RATE_LIMITED, raised.exception.outcome)
+        self.assertIsNone(raised.exception.retry_after_ms)
+
     async def test_invalid_dataset_schema_is_parse_drift(self) -> None:
         from src.marketplaces.apify_client import ApifyClient
 

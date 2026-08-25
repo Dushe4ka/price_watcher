@@ -42,6 +42,7 @@ def make_source(
     search_actor_id: str = 'synthetic-search-actor',
     status_code: int = 200,
     payload: object | None = None,
+    headers: dict[str, str] | None = None,
 ):
     from src.marketplaces.apify_client import ApifyClient
     from src.marketplaces.sources.apify import ApifySource
@@ -50,6 +51,7 @@ def make_source(
         return httpx.Response(
             status_code,
             json=[] if payload is None else payload,
+            headers=headers,
             request=request,
         )
 
@@ -153,6 +155,26 @@ class ApifySourceTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(outcome, result.outcome)
                 self.assertEqual(error_code, result.attempt.error_code)
+
+    async def test_rate_limit_attempt_carries_the_retry_after_hint(
+        self,
+    ) -> None:
+        """``_dataset_or_result`` must forward ``exc.retry_after_ms``."""
+        result = await make_source(
+            status_code=429,
+            headers={'Retry-After': '7'},
+        ).search_products(SearchRequest(query='synthetic', limit=2))
+
+        self.assertEqual(SourceOutcome.RATE_LIMITED, result.outcome)
+        self.assertEqual(7_000, result.attempt.retry_after_ms)
+
+    async def test_rate_limit_without_a_header_has_no_hint(self) -> None:
+        result = await make_source(status_code=429).search_products(
+            SearchRequest(query='synthetic', limit=2),
+        )
+
+        self.assertEqual(SourceOutcome.RATE_LIMITED, result.outcome)
+        self.assertIsNone(result.attempt.retry_after_ms)
 
     async def test_transport_failure_is_safe_and_is_not_retried(self) -> None:
         from src.marketplaces.apify_client import ApifyClient

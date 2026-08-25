@@ -80,6 +80,17 @@ ServiceFactory = Callable[[str], Any]
 DEFAULT_SERVICE_FACTORY: ServiceFactory | None = None
 
 
+class ProbeInputError(ValueError):
+    """A rejected probe argument, carrying only a fixed, curated message.
+
+    Every message raised as this type is a literal composed from the closed
+    option sets, so it can be printed verbatim. Any *other* ``ValueError``
+    reaching a handler — a pydantic ``ValidationError`` from loading settings,
+    for instance, which renders ``input_value=`` — is rendered by class name
+    only. See :func:`_render_input_rejection`.
+    """
+
+
 class LiveProbeDisabled(RuntimeError):
     """The live gate is not explicitly enabled, so nothing may be probed."""
 
@@ -102,7 +113,7 @@ def parse_marketplace(value: str) -> MarketplaceName:
     for marketplace in MARKETPLACES:
         if marketplace == normalized:
             return marketplace
-    raise ValueError(
+    raise ProbeInputError(
         'unsupported marketplace; expected one of: '
         + ', '.join(MARKETPLACES)
     )
@@ -114,7 +125,7 @@ def parse_operation(value: str) -> MarketplaceOperation:
     for operation in MarketplaceOperation:
         if operation.value == normalized:
             return operation
-    raise ValueError(
+    raise ProbeInputError(
         'unsupported operation; expected one of: '
         + ', '.join(item.value for item in MarketplaceOperation)
     )
@@ -132,6 +143,24 @@ async def run_one_probe(
 ) -> int:
     """Run exactly one bounded operation and report only safe aggregates."""
     silence_transport_request_logs()
+    if service_factory is None:
+        # The gate guards the composition point itself, not just ``main``:
+        # importing ``run_one_probe`` from elsewhere must not be a way around
+        # it. An injected factory is a fake by definition and stays ungated.
+        #
+        # This must run *before* ``_build_request``: defaulting a category
+        # slug reads the categories configuration, which imports application
+        # settings. An ungated run may not load marketplace configuration at
+        # all, so nothing that can touch it may precede the gate.
+        try:
+            assert_live_tests_enabled(os.environ)
+        except LiveProbeDisabled as exc:
+            writer(str(exc))
+            return EXIT_DISABLED
+        from src.marketplaces.service import get_marketplace_service
+
+        service_factory = get_marketplace_service
+
     try:
         request = _build_request(
             operation,
@@ -141,21 +170,9 @@ async def run_one_probe(
             product_id=product_id,
         )
     except ValueError as exc:
-        writer(f'probe input rejected: {exc}')
+        writer(_render_input_rejection(exc))
         return EXIT_USAGE
 
-    if service_factory is None:
-        # The gate guards the composition point itself, not just ``main``:
-        # importing ``run_one_probe`` from elsewhere must not be a way around
-        # it. An injected factory is a fake by definition and stays ungated.
-        try:
-            assert_live_tests_enabled(os.environ)
-        except LiveProbeDisabled as exc:
-            writer(str(exc))
-            return EXIT_DISABLED
-        from src.marketplaces.service import get_marketplace_service
-
-        service_factory = get_marketplace_service
     service = service_factory(marketplace)
     try:
         result = await _invoke(service, operation, request)
@@ -195,7 +212,7 @@ def main(
         marketplace = parse_marketplace(args.marketplace)
         operation = parse_operation(args.operation)
     except ValueError as exc:
-        writer(f'probe input rejected: {exc}')
+        writer(_render_input_rejection(exc))
         return EXIT_USAGE
 
     return asyncio.run(
@@ -209,6 +226,20 @@ def main(
             writer=writer,
         ),
     )
+
+
+def _render_input_rejection(exc: ValueError) -> str:
+    """Describe a rejected input without ever echoing an exception message.
+
+    Only :class:`ProbeInputError` carries a message this module wrote, so only
+    its message may be printed. Every other ``ValueError`` — most importantly a
+    pydantic ``ValidationError`` raised while importing application settings,
+    which renders the offending ``input_value=`` — is reduced to its class
+    name by :func:`~src.marketplaces.telemetry.safe_exception_label`.
+    """
+    if isinstance(exc, ProbeInputError):
+        return f'probe input rejected: {exc}'
+    return f'probe input rejected ({safe_exception_label(exc)})'
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -247,7 +278,7 @@ def _build_request(
     if operation is MarketplaceOperation.CRAWL_CATEGORY:
         slug = category_slug or _first_configured_slug(marketplace)
         if not slug:
-            raise ValueError('crawl_category needs --category')
+            raise ProbeInputError('crawl_category needs --category')
         return CategoryRequest(category_slug=slug, limit=PROBE_LIMIT)
     if operation is MarketplaceOperation.SEARCH_PRODUCTS:
         return SearchRequest(
@@ -256,7 +287,7 @@ def _build_request(
             page=PROBE_PAGE,
         )
     if not product_id:
-        raise ValueError('parse_product needs --product-id')
+        raise ProbeInputError('parse_product needs --product-id')
     return ProductRequest(product_id)
 
 
@@ -297,6 +328,7 @@ __all__ = (
     'LiveProbeDisabled',
     'PROBE_LIMIT',
     'PROBE_PAGE',
+    'ProbeInputError',
     'assert_live_tests_enabled',
     'main',
     'parse_marketplace',
