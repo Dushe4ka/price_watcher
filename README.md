@@ -124,16 +124,20 @@ git clone https://github.com/Dushe4ka/price_watcher.git
 cd price_watcher
 cp .env.example .env
 # заполните .env
-docker compose up -d --build
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 ```
+
+Базовый `docker-compose.yml` намеренно не публикует ни одного порта — нужен оверлей:
+`docker-compose.local.yml` для локальной разработки (порты на `127.0.0.1`) или
+`docker-compose.production.yml` для VPS (наружу смотрит только nginx).
 
 - API + Swagger: http://localhost:8000/docs  
 - Миграции применяются при старте `api`  
 - Бот: polling, scheduler в контейнере `telegram_bot`
 
 ```bash
-docker compose down      # остановка
-docker compose logs -f telegram_bot   # логи бота
+docker compose -f docker-compose.yml -f docker-compose.local.yml down      # остановка
+docker compose -f docker-compose.yml -f docker-compose.local.yml logs -f telegram_bot   # логи бота
 ```
 
 ---
