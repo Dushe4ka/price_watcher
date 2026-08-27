@@ -100,6 +100,7 @@ class MarketplaceSettingsTests(TestCase):
     ) -> None:
         settings = make_settings(
             marketplace_total_timeout_sec=300,
+            marketplace_operation_timeout_sec=900,
             marketplace_max_content_bytes=10_485_760,
         )
 
@@ -134,6 +135,34 @@ class MarketplaceSettingsTests(TestCase):
             with self.subTest(field=field, value=value):
                 with self.assertRaises(ValidationError):
                     make_settings(**{field: value})
+
+    def test_operation_timeout_must_exceed_the_per_source_timeout(
+        self,
+    ) -> None:
+        settings = make_settings(
+            marketplace_total_timeout_sec=30,
+            marketplace_operation_timeout_sec=31,
+        )
+
+        self.assertEqual(30, settings.marketplace_total_timeout_sec)
+        self.assertEqual(31, settings.marketplace_operation_timeout_sec)
+
+        with self.assertRaisesRegex(
+            ValidationError,
+            'marketplace operation timeout must be strictly greater',
+        ):
+            make_settings(
+                marketplace_total_timeout_sec=30,
+                marketplace_operation_timeout_sec=30,
+            )
+        with self.assertRaisesRegex(
+            ValidationError,
+            'marketplace operation timeout must be strictly greater',
+        ):
+            make_settings(
+                marketplace_total_timeout_sec=30,
+                marketplace_operation_timeout_sec=29,
+            )
 
     def test_secret_values_are_redacted_in_settings_and_validation_errors(
         self,

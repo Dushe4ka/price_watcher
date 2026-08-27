@@ -203,6 +203,23 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator('marketplace_operation_timeout_sec')
+    @classmethod
+    def validate_operation_timeout_bounds(
+        cls,
+        value: int,
+        info: ValidationInfo,
+    ) -> int:
+        """Keep the shared operation deadline above the per-source one."""
+        data = info.data
+        total_timeout = data.get('marketplace_total_timeout_sec', 0)
+        if value <= total_timeout:
+            raise ValueError(
+                'marketplace operation timeout must be strictly greater '
+                'than the per-source timeout'
+            )
+        return value
+
     @field_validator('smartcaptcha_widget_id')
     @classmethod
     def validate_smartcaptcha_widget_id(cls, value: str) -> str:
