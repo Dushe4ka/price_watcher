@@ -115,7 +115,7 @@ overlay:
 
 ```
 docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
-docker compose -f docker-compose.yml -f docker-compose.local.yml logs -f telegram_bot
+docker compose -f docker-compose.yml -f docker-compose.local.yml logs -f bot
 docker compose -f docker-compose.yml -f docker-compose.local.yml down
 ```
 
