@@ -105,14 +105,24 @@ def retry_settings(
     base_delay_ms: int = 250,
     max_delay_ms: int = 1000,
     total_timeout_sec: int = 30,
+    operation_timeout_sec: int = 90,
 ) -> Settings:
-    """Return real settings with only the retry knobs overridden."""
+    """Return real settings with only the retry knobs overridden.
+
+    ``total_timeout_sec`` is the per-source budget
+    (``marketplace_total_timeout_sec``); ``operation_timeout_sec`` is the
+    budget shared across the whole fallback chain
+    (``marketplace_operation_timeout_sec``). They are deliberately kept as
+    two independent parameters so a test can exhaust one without touching
+    the other.
+    """
     return default_settings.model_copy(
         update={
             'marketplace_retry_max_attempts': max_attempts,
             'marketplace_retry_base_delay_ms': base_delay_ms,
             'marketplace_retry_max_delay_ms': max_delay_ms,
             'marketplace_total_timeout_sec': total_timeout_sec,
+            'marketplace_operation_timeout_sec': operation_timeout_sec,
         },
     )
 
@@ -183,6 +193,43 @@ class StubSource:
         if len(results) == 1:
             return results[0]
         return results.pop(0)
+
+
+class TimeConsumingSource:
+    """Source stub that advances the shared clock before returning.
+
+    Models a source that spends its own entire per-invocation timeout
+    before failing (e.g. a browser navigation that runs to its own
+    deadline), so a test can prove the shared operation deadline still
+    leaves room for the sources after it in the chain.
+    """
+
+    def __init__(
+        self,
+        source: SourceName,
+        clock: Any,
+        elapsed_sec: float,
+        result: SourceResult[Any],
+    ) -> None:
+        self.source = source
+        self.requests: list[Any] = []
+        self._clock = clock
+        self._elapsed_sec = elapsed_sec
+        self._result = result
+
+    async def crawl_category(self, request: Any) -> SourceResult[Any]:
+        return self._consume(request)
+
+    async def parse_product(self, request: Any) -> SourceResult[Any]:
+        return self._consume(request)
+
+    async def search_products(self, request: Any) -> SourceResult[Any]:
+        return self._consume(request)
+
+    def _consume(self, request: Any) -> SourceResult[Any]:
+        self.requests.append(request)
+        self._clock.advance(self._elapsed_sec)
+        return self._result
 
 
 class StubRegistry:

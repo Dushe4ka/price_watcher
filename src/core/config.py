@@ -146,7 +146,27 @@ class Settings(BaseSettings):
     smartcaptcha_mode: SmartCaptchaMode = 'disabled'
     smartcaptcha_client_key: SecretStr = SecretStr('')
     smartcaptcha_widget_id: str = ''
+    # Per-source budget: each source in a fallback chain (the browser
+    # sources' own navigation deadline in ``registry.py`` and Apify's own
+    # HTTP client timeout in ``apify_client.py``) uses this value as ITS
+    # OWN per-invocation timeout. See ``marketplace_operation_timeout_sec``
+    # below for the deadline shared across the whole fallback chain.
     marketplace_total_timeout_sec: int = Field(default=30, gt=0, le=300)
+    # Operation budget shared by every source of one fallback chain via
+    # ``SourceRetryExecutor``'s ``OperationDeadline`` (built once per call
+    # in ``MarketplaceService._run``). Must stay strictly larger than any
+    # single source's own ``marketplace_total_timeout_sec`` above, or a
+    # source that consumes its full per-source budget leaves the shared
+    # deadline already expired for every source after it in the chain --
+    # silently dropping the rest of the fallback chain. The default covers
+    # a two-source chain (Ozon/WB's default browser -> apify chain, see
+    # ``_DEFAULT_SOURCE_CHAINS``) each budgeted at the default 30 s
+    # per-source timeout, i.e. >= 2 * marketplace_total_timeout_sec.
+    marketplace_operation_timeout_sec: int = Field(
+        default=90,
+        gt=0,
+        le=900,
+    )
     marketplace_max_content_bytes: int = Field(
         default=2_000_000,
         gt=0,

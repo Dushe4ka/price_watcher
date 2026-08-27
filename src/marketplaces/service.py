@@ -123,8 +123,21 @@ class MarketplaceService:
         request: Request,
         invoke: SourceInvoke,
     ) -> MarketplaceResult[Any]:
+        """Run one operation over its configured chain under one deadline.
+
+        The shared deadline is built from
+        ``marketplace_operation_timeout_sec``, which must stay strictly
+        larger than any single source's own per-invocation timeout
+        (``marketplace_total_timeout_sec``, used by the browser sources in
+        ``registry.py`` and by Apify's HTTP client in ``apify_client.py``).
+        Reusing the per-source setting here was the bug: a source that
+        consumes its full per-source budget would leave the shared
+        deadline already expired by the time the next source in the chain
+        is due, so that next source -- e.g. Apify, the fallback for a
+        browser wall -- would never run at all.
+        """
         deadline = OperationDeadline.from_timeout_ms(
-            self._settings.marketplace_total_timeout_sec * 1000,
+            self._settings.marketplace_operation_timeout_sec * 1000,
             self._clock,
         )
         calls = tuple(

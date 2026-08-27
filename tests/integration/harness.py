@@ -532,12 +532,16 @@ async def _retry_flow(
     # hands it over and nothing here wires a retry of its own. Only the
     # retry configuration is overridden: ``max_attempts`` is the variable
     # under test and zero delay keeps the suite free of wall-clock sleeps
-    # without weakening the count.
+    # without weakening the count. ``operation_timeout_sec`` (not
+    # ``total_timeout_sec``, the unrelated per-source browser timeout set
+    # below via ``controlled_stack``) is the setting the service now reads
+    # for its shared deadline, kept generous so it never truncates a
+    # legitimately slow real-browser leg.
     settings = retry_settings(
         max_attempts=max_attempts,
         base_delay_ms=0,
         max_delay_ms=0,
-        total_timeout_sec=60,
+        operation_timeout_sec=60,
     )
 
     async with controlled_stack(

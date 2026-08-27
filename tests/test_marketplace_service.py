@@ -29,6 +29,7 @@ from tests.marketplace_service_fakes import (
     RecordingSleep,
     StubRegistry,
     StubSource,
+    TimeConsumingSource,
     challenge,
     crawl_result,
     empty,
@@ -286,6 +287,13 @@ class ServiceRetryWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([0.01], sleep.delays)
 
     async def test_one_deadline_is_shared_by_the_whole_chain(self) -> None:
+        """A genuinely exhausted *operation* deadline stops a later source.
+
+        ``operation_timeout_sec`` is set well below what the clock consumes
+        while ``total_timeout_sec`` (the unrelated per-source budget) stays
+        at its ordinary default, so this proves the shared deadline itself
+        is enforced -- independent of any single source's own timeout.
+        """
         sleep = RecordingSleep()
         public = StubSource(
             SourceName.PUBLIC,
@@ -298,7 +306,7 @@ class ServiceRetryWiringTests(unittest.IsolatedAsyncioTestCase):
         service, _ = make_service(
             chain=(SourceName.PUBLIC, SourceName.APIFY),
             sources={SourceName.PUBLIC: public, SourceName.APIFY: apify},
-            settings=retry_settings(total_timeout_sec=30),
+            settings=retry_settings(operation_timeout_sec=30),
             sleep=sleep,
             clock=FakeClock(step=20.0),
         )
@@ -310,6 +318,48 @@ class ServiceRetryWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(SourceOutcome.TRANSPORT_ERROR, result.outcome)
         self.assertEqual(0, result.attempts[1].transport_attempts)
         self.assertEqual([], sleep.delays)
+
+    async def test_apify_still_runs_after_browser_exhausts_its_budget(
+        self,
+    ) -> None:
+        """A source's own full per-source timeout must not starve the chain.
+
+        Regression test for the Critical defect where the shared operation
+        deadline was built from the SAME setting each source also uses as
+        its own per-invocation timeout. A browser-shaped source that
+        consumes its entire default per-source budget (30 s) before
+        failing must still leave enough of the (much larger) operation
+        budget for Apify to run afterwards -- it must not be silently
+        skipped by an operation deadline that expired in lockstep with the
+        exhausted source.
+        """
+        settings = retry_settings(max_attempts=1)
+        clock = FakeClock()
+        per_source_timeout_sec = settings.marketplace_total_timeout_sec
+        browser = TimeConsumingSource(
+            SourceName.BROWSER,
+            clock,
+            per_source_timeout_sec,
+            transport_error(SourceName.BROWSER),
+        )
+        apify = StubSource(
+            SourceName.APIFY,
+            success(SourceName.APIFY, parsed_product()),
+        )
+        service, _ = make_service(
+            chain=(SourceName.BROWSER, SourceName.APIFY),
+            sources={SourceName.BROWSER: browser, SourceName.APIFY: apify},
+            settings=settings,
+            sleep=RecordingSleep(),
+            clock=clock,
+        )
+
+        result = await service.parse_product(ProductRequest('9000001'))
+
+        self.assertEqual(1, len(browser.requests))
+        self.assertEqual([ProductRequest('9000001')], apify.requests)
+        self.assertEqual(SourceName.APIFY, result.selected_source)
+        self.assertEqual(SourceOutcome.SUCCESS, result.outcome)
 
     async def test_challenge_is_never_retried(self) -> None:
         browser = StubSource(

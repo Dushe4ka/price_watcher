@@ -116,6 +116,25 @@ class MarketplaceSettingsTests(TestCase):
                 with self.assertRaises(ValidationError):
                     make_settings(**{field: value})
 
+    def test_operation_timeout_is_independent_of_the_per_source_timeout(
+        self,
+    ) -> None:
+        settings = make_settings(
+            marketplace_total_timeout_sec=30,
+            marketplace_operation_timeout_sec=900,
+        )
+
+        self.assertEqual(30, settings.marketplace_total_timeout_sec)
+        self.assertEqual(900, settings.marketplace_operation_timeout_sec)
+
+        for field, value in (
+            ('marketplace_operation_timeout_sec', 0),
+            ('marketplace_operation_timeout_sec', 901),
+        ):
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(ValidationError):
+                    make_settings(**{field: value})
+
     def test_secret_values_are_redacted_in_settings_and_validation_errors(
         self,
     ) -> None:
