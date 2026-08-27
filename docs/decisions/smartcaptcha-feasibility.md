@@ -1,7 +1,8 @@
 # SmartCaptcha: границы frictionless-режима
 
 **Дата:** 2026-08-22
-**Статус:** принято для первой поставки
+**Статус:** принято и реализовано; поставляется выключенным по умолчанию
+(`SMARTCAPTCHA_MODE=disabled`)
 
 ## Решение
 
@@ -53,10 +54,11 @@ fail-closed приоритет.
 
 Исчезновение challenge доказывает только завершение CAPTCHA-этапа. Оно не
 доказывает корректность HTML/JSON маркетплейса и не означает, что товар найден.
-Marketplace-specific structural validator выполняется downstream в Task 11 и
-только он классифицирует полученные данные. Код причины
-`CHALLENGE_UNSUPPORTED` также формируется на границе marketplace source, тогда
-как CAPTCHA-контракт Task 9 сохраняет enum `ChallengeResolution`.
+Marketplace-specific structural validator (`src/marketplaces/validation.py`)
+выполняется downstream и только он классифицирует полученные данные. Код
+причины `challenge_unsupported` формируется на границе marketplace source
+(`src/marketplaces/sources/browser.py`), тогда как CAPTCHA-контракт
+(`src/captcha/models.py`) сохраняет enum `ChallengeResolution`.
 
 ## Источники
 
@@ -71,3 +73,25 @@ Yandex SmartCaptcha там нет; найден только сторонний 
 
 OhMyCaptcha не поддерживает SmartCaptcha в pinned snapshot. Подстановка
 выдуманного token, client key или server key запрещена.
+
+## Где это в коде
+
+| Файл | Роль |
+|------|------|
+| `src/captcha/smartcaptcha.py` | `SmartCaptchaMode`, валидация `widgetId`, сам обработчик |
+| `src/captcha/coordinator.py` | Разбор challenge строго на переданной `Page`, повторная детекция после действия обработчика |
+| `src/captcha/detector.py` | Определение типа challenge и признака интерактивности |
+| `src/core/config.py` | `SMARTCAPTCHA_MODE`, `SMARTCAPTCHA_CLIENT_KEY`, `SMARTCAPTCHA_WIDGET_ID` и `validate_smartcaptcha_widget_id` |
+| `src/marketplaces/registry.py` | `build_challenge_coordinator` — обработчик подключается только при явной конфигурации |
+
+Инвариант «одна и та же `Page` / один и тот же `Context`», в который этот
+документ встроен, и таксономия исходов описаны в
+`docs/architecture/marketplace-fallback.md` (разделы 8 и 12). Операционная
+сторона — `docs/runbooks/troubleshooting.md`, раздел 5.
+
+## Что осталось непроверенным
+
+Frictionless-режим ни разу не запускался против живой площадки: для этого
+нужен доверенный публичный `SMARTCAPTCHA_WIDGET_ID`, которого у проекта нет.
+Реализация покрыта тестами (`tests/test_smartcaptcha.py`,
+`tests/test_challenge_coordinator.py`), но живой прогон — открытый пункт.

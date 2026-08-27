@@ -50,11 +50,24 @@ Telegram-сервис для мониторинга цен на маркетпл
 
 **Ozon** — сессия на [patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) (форк Playwright с патчами против CDP-детекта: `Runtime.enable`, `--enable-automation` и т.п.), headed, канал `chrome` (настоящий Google Chrome, не bundled Chromium), персистентный профиль (`OZON_PROFILE_DIR`, в проде — Docker volume) вместо одноразового — по рекомендациям patchright это главный рычаг стелса, важнее самого канала `chrome`. Затем читает `entrypoint-api.bx` / `composer-api.bx`.
 
-**Статус на 2026-08-10: всё ещё заблокирован.** Проверено вживую (реальный VPS + приватная мобильная SIM через SSH-туннель, не шэйред-прокси): ни один вариант не даёт полного прохода — обычный Playwright (headless и headed) на этом IP давал `Antibot Captcha`, patchright с headed+`channel=chrome` на том же IP дал ровно то же самое. Значит дело не только в IP и не только в CDP-детекте по отдельности — возможно, поможет именно «состаренный» персистентный профиль (нужно время, не проверяется одним прогоном), возможно — нет. `PROXY_LIST` (RU residential/mobile) и `OZON_PROXY_REQUIRED=true` — по прежнему нужны, просто уже недостаточны сами по себе. Автоматическое решение капчи не реализовано и не планируется (это уже обход прямой человеческой верификации, а не просто маскировка). Лимиты: `OZON_REQUEST_DELAY_SEC`, `OZON_FETCH_RETRIES`, circuit-breaker `OZON_BLOCK_COOLDOWN_SEC`. Smoke: `python -m scripts.smoke_ozon_crawl`.
+**Статус на 2026-08-10: всё ещё заблокирован.** Проверено вживую (реальный VPS + приватная мобильная SIM через SSH-туннель, не шэйред-прокси): ни один вариант не даёт полного прохода — обычный Playwright (headless и headed) на этом IP давал `Antibot Captcha`, patchright с headed+`channel=chrome` на том же IP дал ровно то же самое. Значит дело не только в IP и не только в CDP-детекте по отдельности — возможно, поможет именно «состаренный» персистентный профиль (нужно время, не проверяется одним прогоном), возможно — нет. `PROXY_LIST` (RU residential/mobile) и `OZON_PROXY_REQUIRED=true` — по прежнему нужны, просто уже недостаточны сами по себе. Автоматическое решение интерактивной капчи не реализовано и не планируется: это обход прямой человеческой верификации. Утверждён и реализован только узкий bounded scope — frictionless-режим Yandex SmartCaptcha (`SMARTCAPTCHA_MODE=frictionless`) для **уже присутствующего** на арендованной странице виджета с заранее известным публичным `SMARTCAPTCHA_WIDGET_ID`, через документированные `subscribe()`/`execute()`, без создания браузера/контекста/страницы/виджета, без загрузки внешних скриптов и без сохранения токена. Всё остальное — интерактивные задания, отсутствующий доверенный widget ID, ошибки и истёкшие токены — fail-closed (`challenge_unsupported`). По умолчанию режим отключён. Подробности и границы: `docs/decisions/smartcaptcha-feasibility.md` и `docs/architecture/marketplace-fallback.md`. Лимиты: `OZON_REQUEST_DELAY_SEC`, `OZON_FETCH_RETRIES`, circuit-breaker `OZON_BLOCK_COOLDOWN_SEC`. Smoke: `python -m scripts.smoke_ozon_crawl`.
 
 **Почему скидок может быть 0:** скидка по истории БД появляется после нескольких дней обходов (`DATA_COLLECTION_WARMUP_DAYS`).
 
 **Что помогает:** прокси/модем (`PROXY_LIST`), `DATA_COLLECTION_WARMUP_DAYS=3` на период накопления истории.
+
+---
+
+## Документация
+
+| Документ | О чём |
+|----------|-------|
+| `docs/architecture/marketplace-fallback.md` | Архитектура marketplace fallback: data flow, state machine исходов, structural `empty`, инвариант «одна `Page` / один `Context`», layout персистентных профилей, матрица версий браузеров, границы вендора OhMyCaptcha, роль Apify, retry и два таймаута |
+| `docs/runbooks/local-development.md` | Локальная разработка: установка, тесты, стиль, Compose-оверлеи, полный справочник переменных окружения маркетплейсов, smoke- и probe-скрипты |
+| `docs/runbooks/vps-deployment.md` | Деплой на VPS: тома и права (включая одноразовый `chown`), `WEB_CONCURRENCY=1`, Xvfb и headed-браузеры, seccomp/non-root, readiness, эксплуатация |
+| `docs/runbooks/troubleshooting.md` | Разбор ошибок: таксономия `SafeErrorCode`, что значит каждый исход, конфликты блокировки профиля, антибот-стены, неверная настройка таймаутов |
+| `docs/decisions/smartcaptcha-feasibility.md` | Границы утверждённого frictionless-режима SmartCaptcha |
+| `infra/playwright/README.md` | Hardening контейнеров с браузерами: seccomp, tini, Xvfb, `shm_size`, amd64 |
 
 ---
 
@@ -83,6 +96,29 @@ bot/deals_scheduler.py           # APScheduler, каждые N минут
 bot/navigation/                  # тексты, клавиатуры, навигация бота
 bot/handlers/                    # команды и callback-обработчики
 ```
+
+### Marketplace fallback
+
+Обращения к площадкам идут через один слой с настраиваемой цепочкой источников:
+
+```
+src/marketplaces/service.py      # один OperationDeadline на операцию
+        ▼
+src/marketplaces/registry.py     # цепочка источников из конфигурации
+        ▼  public → browser → apify (порядок настраивается на площадку)
+src/marketplaces/fallback.py     # каждый источник ровно один раз,
+                                 # до первого терминального исхода
+        ▼
+src/marketplaces/retry.py        # ограниченный transport-retry внутри источника
+src/browser/                     # персистентные профили, ProfileLock, allowlist
+src/captcha/                     # разбор challenge на той же самой Page
+```
+
+Ключевые свойства: навигация только по HTTPS и только по точному списку хостов
+(`www.ozon.ru`, `www.wildberries.ru`, `market.yandex.ru`); «пусто» отличается от
+«заблокировано» структурно; в логи попадают только разрешённые поля (без URL,
+запросов, ID товаров, cookie и токенов). Подробно —
+`docs/architecture/marketplace-fallback.md`.
 
 ### Модели БД
 
@@ -200,6 +236,27 @@ artifacts или небезопасном Docker context.
 | `WB_BLOCK_COOLDOWN_SEC` | `120` | cooldown после серии antibot-блоков WB |
 | `CATEGORIES_CONFIG_PATH` | `config/monitored_categories.yaml` | категории |
 
+### Маркетплейсы: источники, таймауты, CAPTCHA
+
+Полный справочник (`MARKETPLACE_*`, `*_SOURCE_CHAIN`, `APIFY_*`,
+`CAPTCHA_ADAPTER_MODE`, `SMARTCAPTCHA_*`, `BROWSER_PROFILE_ROOT`,
+`WEB_CONCURRENCY`) со значениями по умолчанию —
+`docs/runbooks/local-development.md`, раздел 5. Кратко:
+
+| Переменная | По умолчанию | Описание |
+|------------|--------------|----------|
+| `WILDBERRIES_SOURCE_CHAIN` | `browser,apify` | порядок источников |
+| `OZON_SOURCE_CHAIN` | `browser,apify` | порядок источников |
+| `YANDEX_MARKET_SOURCE_CHAIN` | `public,browser,apify` | у ЯМ есть дешёвый `public`-этап |
+| `MARKETPLACE_TOTAL_TIMEOUT_SEC` | `30` | бюджет **одного** источника |
+| `MARKETPLACE_OPERATION_TIMEOUT_SEC` | `90` | общий дедлайн **всей** цепочки; строго больше предыдущего |
+| `BROWSER_PROFILE_ROOT` | `browser-profiles` | корень персистентных профилей, `<root>/<role>/<marketplace>` |
+| `WEB_CONCURRENCY` | — | обязан быть `1`: у персистентного профиля ровно один владелец |
+
+Apify-этап полностью инертен, пока не заданы и `APIFY_TOKEN`, и actor ID для
+конкретной пары маркетплейс/операция — иначе источник отвечает `disabled`,
+не открывая сокет.
+
 > Админ должен написать боту `/start`, иначе модерация в ЛС не дойдёт.
 
 ---
@@ -301,7 +358,7 @@ bot/
 
 ## Стек
 
-FastAPI · SQLAlchemy 2.0 · Alembic · PostgreSQL · python-telegram-bot 22 · APScheduler · httpx · Playwright · Docker
+FastAPI · SQLAlchemy 2.0 · Alembic · PostgreSQL · python-telegram-bot 22 · APScheduler · httpx · Playwright 1.53 · patchright 1.61 · Docker
 
 ---
 

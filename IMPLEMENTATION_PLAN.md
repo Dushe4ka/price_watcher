@@ -53,6 +53,38 @@
 - Quick-add: ссылка или артикул (`/add`, `track_link_parser.py`)
 - Пароль: 8–64 символа (бот + API)
 
+### Фаза 8 — Marketplace fallback + CAPTCHA-контур ✅
+
+- `src/marketplaces/` — единый слой доступа к площадкам: `service.py`
+  (композиция, один `OperationDeadline` на операцию), `registry.py`
+  (цепочки источников из конфигурации), `fallback.py` (каждый источник
+  ровно один раз, до первого терминального исхода), `retry.py`
+  (`SourceRetryExecutor` — единственный владелец transport-retry),
+  `contracts.py`, `validation.py`, `telemetry.py`, `diagnostics.py`.
+- Цепочки по умолчанию: WB и Ozon — `browser,apify`, ЯМ —
+  `public,browser,apify`. Apify инертен без токена и actor ID.
+- Structural `empty`: «нет товаров» отличается от «нас заблокировали» по
+  положительным структурным маркерам, а не по пустому результату.
+- `src/browser/` — персистентные профили по паре `(role, marketplace)`,
+  `ProfileLock` (неблокирующий `flock`), HTTPS-only allowlist с точным
+  списком хостов, проверка редиректов на каждом `framenavigated`.
+- `src/captcha/` — разбор challenge строго на той же `Page`; SmartCaptcha
+  только в утверждённом frictionless-режиме, по умолчанию выключена;
+  вендор OhMyCaptcha изолирован в `vendor/ohmycaptcha/` со своим
+  `requirements.txt` и своим pin Playwright.
+- Безопасные логи: аллоулист полей в `telemetry.py`, никаких URL, запросов,
+  ID товаров, cookie и токенов.
+- Контейнеры: non-root `pwuser`, seccomp-профиль Playwright, `tini` + Xvfb
+  для headed-браузеров, отдельный том профилей на каждую роль,
+  `WEB_CONCURRENCY=1`.
+- Два раздельных таймаута: `MARKETPLACE_TOTAL_TIMEOUT_SEC` (на источник) и
+  `MARKETPLACE_OPERATION_TIMEOUT_SEC` (на всю цепочку), с cross-field
+  валидацией «operation строго больше per-source».
+- Документация: `docs/architecture/marketplace-fallback.md`,
+  `docs/runbooks/local-development.md`, `docs/runbooks/vps-deployment.md`,
+  `docs/runbooks/troubleshooting.md`; контракт документации проверяется
+  `tests/test_documented_configuration.py`.
+
 ---
 
 ## Логика скидок
@@ -85,7 +117,7 @@
 | 3 | ЯМ: нет `highPrice` → нет скидки парсера | ✅ цена «до скидки» берётся из `apiary-patch` (`offerAnalytics.oldPrice`) |
 | 4 | Мало товаров (~68 vs 480 макс.) | Средний — п.1 (Ozon) + `MAX_PRODUCTS_PER_CATEGORY` |
 | 5 | `DATA_COLLECTION_WARMUP_DAYS=0` — строгий режим сразу | Низкий — выставить 3–7 на старте |
-| 6 | `Dockerfile.api` не устанавливает Playwright/Chromium/Xvfb | Средний — `POST /deals/run` в api-контейнере упадёт на Ozon/WB без браузера; либо добавить зависимости, либо отключить эндпоинт в проде |
+| 6 | `Dockerfile.api` не устанавливает Playwright/Chromium/Xvfb | ✅ решено — оба образа делят один browser-runtime stage (Chromium + Chrome + Xvfb + tini, non-root), дрейф проверяется `scripts/verify_compose.py`. Альтернатива без браузера — цепочки без `browser` |
 | 7 | Категории WB/ЯМ нужно периодически перепроверять | Низкий — числовые ID и верхнеуровневые URL иногда «уезжают» на другой контент (уже случалось дважды за это время), см. пример в README |
 
 ---
@@ -118,7 +150,13 @@ PROXY_LIST=
 
 - Отдельные каналы по категориям
 - Selenium (пока)
-- Apify / платные парсеры (опционально позже)
+- Автоматическое решение интерактивной капчи (см. README и
+  `docs/decisions/smartcaptcha-feasibility.md`)
+
+Apify больше не «позже»: этап `apify` встроен в цепочки как fallback, но
+остаётся инертным (`disabled`), пока не заданы `APIFY_TOKEN` и actor ID.
+Маппинг датасета — собственная синтетическая схема, против живого actor не
+проверялась.
 
 ---
 
@@ -130,4 +168,7 @@ PROXY_LIST=
 - ✅ **Яндекс Маркет** — работает (без браузера, `httpx` + JSON-LD)
 - ⚠️ **Ozon** — код готов, но канал будет постить 0 сделок по Ozon, пока не появится рабочий приватный резидентный/мобильный прокси (см. backlog #1)
 
-Проверка: `/force_crawl` → отчёт в Telegram (там же видно разбивку по площадкам). Логи: `docker logs telegram_bot`. Смоук-тесты: `python -m scripts.smoke_wb_crawl`, `python -m scripts.smoke_ozon_crawl`.
+Проверка: `/force_crawl` → отчёт в Telegram (там же видно разбивку по площадкам). Логи: `docker logs telegram_bot`. Смоук-тесты: `python -m scripts.smoke_wb_crawl`, `python -m scripts.smoke_ozon_crawl`, а также mock-режим всего стека: `python scripts/smoke_marketplace_stack.py --mode controlled`.
+
+Эксплуатация и разбор ошибок: `docs/runbooks/vps-deployment.md`,
+`docs/runbooks/troubleshooting.md`.
