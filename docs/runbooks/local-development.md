@@ -160,8 +160,8 @@ to the default chain.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `MARKETPLACE_TOTAL_TIMEOUT_SEC` | `30` | Per-source budget (`1..300`). Used by each browser source and by the Apify HTTP client. |
-| `MARKETPLACE_OPERATION_TIMEOUT_SEC` | `90` | Deadline shared by the whole fallback chain (`1..900`). **Must be strictly greater** than the per-source timeout, or `Settings` refuses to load. |
+| `MARKETPLACE_TOTAL_TIMEOUT_SEC` | `30` | Per-source budget (`1..300`). Used by each browser source, the Yandex Market public source's HTTP client, and the Apify HTTP client. |
+| `MARKETPLACE_OPERATION_TIMEOUT_SEC` | `200` | Deadline shared by the whole fallback chain (`1..900`). Must be strictly greater than the per-source timeout AND cover the longest configured chain (Yandex Market's default 3-source `public,browser,apify`) retried up to `MARKETPLACE_RETRY_MAX_ATTEMPTS` times, each at the full per-source timeout -- or `Settings` refuses to load. |
 | `MARKETPLACE_MAX_CONTENT_BYTES` | `2000000` | Cap on any single response/evaluation result (`1..10485760`). |
 | `MARKETPLACE_RETRY_MAX_ATTEMPTS` | `2` | Transport attempts inside one source (`1..2`). Apify is always `1`. |
 | `MARKETPLACE_RETRY_BASE_DELAY_MS` | `250` | Backoff before a retry. |

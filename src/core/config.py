@@ -146,24 +146,43 @@ class Settings(BaseSettings):
     smartcaptcha_mode: SmartCaptchaMode = 'disabled'
     smartcaptcha_client_key: SecretStr = SecretStr('')
     smartcaptcha_widget_id: str = ''
-    # Per-source budget: each source in a fallback chain (the browser
-    # sources' own navigation deadline in ``registry.py`` and Apify's own
-    # HTTP client timeout in ``apify_client.py``) uses this value as ITS
-    # OWN per-invocation timeout. See ``marketplace_operation_timeout_sec``
-    # below for the deadline shared across the whole fallback chain.
+    # Per-source budget: every source in a fallback chain -- the browser
+    # sources' own navigation deadline in ``registry.py``, the Yandex
+    # Market public source's HTTP client timeout in
+    # ``sources/public.py`` (also wired through ``registry.py``), and
+    # Apify's own HTTP client timeout in ``apify_client.py`` -- uses this
+    # value as ITS OWN per-invocation timeout. See
+    # ``marketplace_operation_timeout_sec`` below for the deadline shared
+    # across the whole fallback chain.
     marketplace_total_timeout_sec: int = Field(default=30, gt=0, le=300)
+    # Declared before ``marketplace_operation_timeout_sec`` so its
+    # validator can read the actually configured retry budget below via
+    # ``ValidationInfo.data`` (pydantic only exposes fields validated
+    # earlier in declaration order).
+    marketplace_retry_max_attempts: int = Field(default=2, ge=1, le=2)
+    marketplace_retry_base_delay_ms: int = Field(default=250, ge=0)
+    marketplace_retry_max_delay_ms: int = Field(default=1000, ge=0)
     # Operation budget shared by every source of one fallback chain via
     # ``SourceRetryExecutor``'s ``OperationDeadline`` (built once per call
     # in ``MarketplaceService._run``). Must stay strictly larger than any
-    # single source's own ``marketplace_total_timeout_sec`` above, or a
-    # source that consumes its full per-source budget leaves the shared
-    # deadline already expired for every source after it in the chain --
-    # silently dropping the rest of the fallback chain. The default covers
-    # a two-source chain (Ozon/WB's default browser -> apify chain, see
-    # ``_DEFAULT_SOURCE_CHAINS``) each budgeted at the default 30 s
-    # per-source timeout, i.e. >= 2 * marketplace_total_timeout_sec.
+    # single source's own ``marketplace_total_timeout_sec`` above, AND
+    # must cover the worst case of the LONGEST configured chain --
+    # Yandex Market's default 3-source ``public -> browser -> apify``
+    # chain (see ``_DEFAULT_SOURCE_CHAINS``) -- with every source retried
+    # up to ``marketplace_retry_max_attempts`` times, each consuming its
+    # full per-source budget. Violating either invariant leaves the
+    # shared deadline already expired for a source later in the chain --
+    # silently dropping it from the fallback, which is exactly the
+    # Critical defect this branch was built to fix, first found for the
+    # 2-source Ozon/WB chain and then again for Yandex Market's 3rd leg.
+    # ``validate_operation_timeout_bounds`` enforces both invariants
+    # generically, against ``_DEFAULT_SOURCE_CHAINS`` and
+    # ``marketplace_retry_max_attempts`` directly, so it stays correct if
+    # a chain is ever extended. The default of 200 s comfortably covers
+    # the worst case under the other defaults
+    # (3 sources x 2 attempts x 30 s = 180 s).
     marketplace_operation_timeout_sec: int = Field(
-        default=90,
+        default=200,
         gt=0,
         le=900,
     )
@@ -172,9 +191,6 @@ class Settings(BaseSettings):
         gt=0,
         le=10_485_760,
     )
-    marketplace_retry_max_attempts: int = Field(default=2, ge=1, le=2)
-    marketplace_retry_base_delay_ms: int = Field(default=250, ge=0)
-    marketplace_retry_max_delay_ms: int = Field(default=1000, ge=0)
 
     @field_validator(
         'wildberries_source_chain',
@@ -210,13 +226,44 @@ class Settings(BaseSettings):
         value: int,
         info: ValidationInfo,
     ) -> int:
-        """Keep the shared operation deadline above the per-source one."""
+        """Keep the shared operation deadline able to outlast a full chain.
+
+        Two independent invariants are enforced:
+
+        1. The operation deadline must be strictly greater than a single
+           source's own per-invocation timeout -- otherwise the very
+           first source in any chain could already expire the shared
+           deadline for everyone after it.
+        2. The operation deadline must cover the worst case of the
+           longest chain this process can configure by default
+           (``_DEFAULT_SOURCE_CHAINS``), with every source in it retried
+           up to the configured ``marketplace_retry_max_attempts`` times
+           and each attempt consuming its full
+           ``marketplace_total_timeout_sec`` budget. This is deliberately
+           read from the real chain-length constant and the real
+           configured retry budget, not a hardcoded assumption of two
+           sources, so it stays correct if a chain is ever extended.
+        """
         data = info.data
         total_timeout = data.get('marketplace_total_timeout_sec', 0)
         if value <= total_timeout:
             raise ValueError(
                 'marketplace operation timeout must be strictly greater '
                 'than the per-source timeout'
+            )
+        max_attempts = data.get('marketplace_retry_max_attempts', 1)
+        max_chain_length = max(
+            len(chain) for chain in _DEFAULT_SOURCE_CHAINS.values()
+        )
+        worst_case = max_chain_length * max_attempts * total_timeout
+        if value < worst_case:
+            raise ValueError(
+                'marketplace operation timeout must cover the worst case '
+                f'of the longest configured chain ({max_chain_length} '
+                'sources) each retried up to marketplace_retry_max_'
+                f'attempts ({max_attempts}) at marketplace_total_'
+                f'timeout_sec ({total_timeout}s): at least {worst_case}s '
+                f'required, got {value}s'
             )
         return value
 

@@ -165,18 +165,27 @@ Three pieces, all in `src/marketplaces/retry.py`, composed only by
 
 | Setting | Default | Read by | Scope |
 | --- | --- | --- | --- |
-| `MARKETPLACE_TOTAL_TIMEOUT_SEC` | `30` | `src/marketplaces/registry.py` (browser sources), `src/marketplaces/apify_client.py` (HTTP client) | **one source's own invocation** |
-| `MARKETPLACE_OPERATION_TIMEOUT_SEC` | `90` | `src/marketplaces/service.py` `_run` only | **the whole fallback chain** |
+| `MARKETPLACE_TOTAL_TIMEOUT_SEC` | `30` | `src/marketplaces/registry.py` (browser sources), `src/marketplaces/sources/public.py` (Yandex Market's `YandexPublicSource` HTTP client), `src/marketplaces/apify_client.py` (HTTP client) | **one source's own invocation** |
+| `MARKETPLACE_OPERATION_TIMEOUT_SEC` | `200` | `src/marketplaces/service.py` `_run` only | **the whole fallback chain** |
 
 They used to be one setting, and that was a defect: a browser source that
 consumed its entire 30 s per-source budget left the shared deadline already
 expired, so Apify — the fallback that exists precisely for an antibot wall —
-was never invoked at all. `Settings.validate_operation_timeout_bounds` now
-enforces the invariant at load time: `MARKETPLACE_OPERATION_TIMEOUT_SEC` must
-be **strictly greater** than `MARKETPLACE_TOTAL_TIMEOUT_SEC`, or the process
-refuses to start. Size it above the sum of the per-source budgets you expect a
-chain to spend; the `90`/`30` default covers the two-source `browser,apify`
-chain with headroom for one internal retry.
+was never invoked at all. That defect resurfaced once more after the two
+settings were split: `MARKETPLACE_OPERATION_TIMEOUT_SEC`'s default was sized
+for the 2-source Ozon/WB `browser,apify` chain only, and nobody recalculated
+it for Yandex Market's 3-source `public,browser,apify` chain, so the same
+starvation happened one leg later (`public`, `public`, `browser` ran;
+`apify` never did). `Settings.validate_operation_timeout_bounds` now enforces
+two invariants at load time: `MARKETPLACE_OPERATION_TIMEOUT_SEC` must be
+**strictly greater** than `MARKETPLACE_TOTAL_TIMEOUT_SEC`, AND it must cover
+the worst case of the *longest* chain in `_DEFAULT_SOURCE_CHAINS` with every
+source retried up to `MARKETPLACE_RETRY_MAX_ATTEMPTS` times, each consuming
+its full per-source budget — read from the real constant and the real
+configured retry budget, not a hardcoded chain length, so the process refuses
+to start rather than silently under-provisioning a longer chain in the
+future. The `200`/`30` default covers the 3-source `public,browser,apify`
+chain (3 sources × 2 attempts × 30 s = 180 s) with headroom.
 
 `Settings.validate_retry_delay_bounds` enforces the neighbouring invariant:
 `MARKETPLACE_RETRY_MAX_DELAY_MS` must not be less than

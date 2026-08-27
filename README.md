@@ -249,7 +249,7 @@ artifacts или небезопасном Docker context.
 | `OZON_SOURCE_CHAIN` | `browser,apify` | порядок источников |
 | `YANDEX_MARKET_SOURCE_CHAIN` | `public,browser,apify` | у ЯМ есть дешёвый `public`-этап |
 | `MARKETPLACE_TOTAL_TIMEOUT_SEC` | `30` | бюджет **одного** источника |
-| `MARKETPLACE_OPERATION_TIMEOUT_SEC` | `90` | общий дедлайн **всей** цепочки; строго больше предыдущего |
+| `MARKETPLACE_OPERATION_TIMEOUT_SEC` | `200` | общий дедлайн **всей** цепочки; строго больше предыдущего и покрывает худший случай самой длинной цепочки (3 источника ЯМ) с учётом повторов |
 | `BROWSER_PROFILE_ROOT` | `browser-profiles` | корень персистентных профилей, `<root>/<role>/<marketplace>` |
 | `WEB_CONCURRENCY` | — | обязан быть `1`: у персистентного профиля ровно один владелец |
 

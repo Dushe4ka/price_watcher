@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
 from typing import Any
@@ -7,6 +8,7 @@ from urllib.parse import quote_plus
 
 import httpx
 
+from src.core.config import settings
 from src.crawlers.base import CategoryCrawlResult
 from src.marketplaces.contracts import (
     CategoryRequest,
@@ -71,8 +73,18 @@ class YandexPublicSource:
     def __init__(
         self,
         client_factory: HttpClientFactory = create_http_client,
+        *,
+        total_timeout_sec: float | None = None,
     ) -> None:
+        timeout = (
+            float(settings.marketplace_total_timeout_sec)
+            if total_timeout_sec is None
+            else total_timeout_sec
+        )
+        if not math.isfinite(timeout) or not 0 < timeout <= 300:
+            raise ValueError('total_timeout_sec must be finite and bounded')
         self._client_factory = client_factory
+        self._timeout = httpx.Timeout(timeout)
         self._parser = YandexMarketParser()
 
     async def crawl_category(
@@ -170,7 +182,10 @@ class YandexPublicSource:
             'Accept-Language': 'ru-RU,ru;q=0.9',
         }
         try:
-            async with self._client_factory(headers=headers) as client:
+            async with self._client_factory(
+                headers=headers,
+                timeout=self._timeout,
+            ) as client:
                 response = await client.get(url)
         except httpx.HTTPError as exc:
             raise MarketplaceSourceError(

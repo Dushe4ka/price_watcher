@@ -238,7 +238,7 @@ class MarketplaceSourceRegistry:
         source: SourceName,
     ) -> Any:
         if source is SourceName.PUBLIC:
-            return _public_source(marketplace)
+            return _public_source(marketplace, self._settings)
         if source is SourceName.APIFY:
             return ApifySource(marketplace, self._apify_client)
         return _BROWSER_SOURCES[marketplace](
@@ -291,12 +291,14 @@ def build_default_registry(
     )
 
 
-def _public_source(marketplace: MarketplaceName) -> Any:
+def _public_source(marketplace: MarketplaceName, settings: Settings) -> Any:
     if marketplace == 'ozon':
         return OzonPublicSource()
     if marketplace == 'wildberries':
         return WildberriesPublicSource()
-    return YandexPublicSource()
+    return YandexPublicSource(
+        total_timeout_sec=float(settings.marketplace_total_timeout_sec),
+    )
 
 
 def _trusted_url(marketplace: MarketplaceName, raw: str) -> str | None:

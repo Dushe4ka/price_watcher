@@ -104,8 +104,8 @@ def retry_settings(
     max_attempts: int = 2,
     base_delay_ms: int = 250,
     max_delay_ms: int = 1000,
-    total_timeout_sec: int = 30,
-    operation_timeout_sec: int = 90,
+    total_timeout_sec: int | None = None,
+    operation_timeout_sec: int | None = None,
 ) -> Settings:
     """Return real settings with only the retry knobs overridden.
 
@@ -114,8 +114,17 @@ def retry_settings(
     budget shared across the whole fallback chain
     (``marketplace_operation_timeout_sec``). They are deliberately kept as
     two independent parameters so a test can exhaust one without touching
-    the other.
+    the other. Leaving either ``None`` falls back to the real, current
+    ``Settings`` default instead of restating it as a literal here, so a
+    test that does not explicitly override one of these two keeps
+    tracking production configuration as it evolves.
     """
+    if total_timeout_sec is None:
+        total_timeout_sec = default_settings.marketplace_total_timeout_sec
+    if operation_timeout_sec is None:
+        operation_timeout_sec = (
+            default_settings.marketplace_operation_timeout_sec
+        )
     return default_settings.model_copy(
         update={
             'marketplace_retry_max_attempts': max_attempts,

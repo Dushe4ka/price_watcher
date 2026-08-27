@@ -205,20 +205,26 @@ timeout misconfiguration. The two settings are separate for exactly this
 reason:
 
 * `MARKETPLACE_TOTAL_TIMEOUT_SEC` (default `30`) is **one source's own**
-  budget, used by each browser source and by the Apify HTTP client.
-* `MARKETPLACE_OPERATION_TIMEOUT_SEC` (default `90`) is the deadline shared by
-  the **whole chain**, built once per operation.
+  budget, used by each browser source, the Yandex Market public source's
+  HTTP client, and the Apify HTTP client.
+* `MARKETPLACE_OPERATION_TIMEOUT_SEC` (default `200`) is the deadline shared
+  by the **whole chain**, built once per operation.
 
 If the operation budget is not comfortably larger than the sum of the
 per-source budgets a chain can spend, a first source that burns its entire
 budget leaves nothing for the rest — so an antibot-walled browser leg would
 never hand over to Apify. `Settings.validate_operation_timeout_bounds`
-enforces the minimum invariant at load time (operation timeout **strictly
-greater** than per-source timeout) and the process refuses to start otherwise,
-but the validator cannot know your chain length. Rule of thumb: set
-`MARKETPLACE_OPERATION_TIMEOUT_SEC` to at least the number of sources in your
-longest chain times `MARKETPLACE_TOTAL_TIMEOUT_SEC`, plus headroom for one
-retry. The `90`/`30` default covers the two-source `browser,apify` chain.
+enforces this at load time, and the process refuses to start otherwise. Two
+invariants are checked: the operation timeout must be **strictly greater**
+than the per-source timeout, AND it must cover the worst case of the
+*longest* configured chain (`_DEFAULT_SOURCE_CHAINS` in `src/core/config.py`)
+with every source retried up to `MARKETPLACE_RETRY_MAX_ATTEMPTS` times, each
+consuming its full per-source budget. The validator reads the real chain
+lengths and the real configured retry budget, so it stays correct even if a
+chain is extended later — you no longer have to work this out by hand. The
+`200`/`30` default covers Yandex Market's default 3-source
+`public,browser,apify` chain (3 sources × 2 attempts × 30 s = 180 s, plus
+headroom).
 
 Note that the shared deadline is enforced *between* sources and before each
 retry, not pushed into a source's own I/O — a source can overrun the operation

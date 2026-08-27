@@ -361,6 +361,62 @@ class ServiceRetryWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(SourceName.APIFY, result.selected_source)
         self.assertEqual(SourceOutcome.SUCCESS, result.outcome)
 
+    async def test_apify_still_runs_after_public_and_browser_exhaust_it(
+        self,
+    ) -> None:
+        """The same starvation defect, one leg longer: Yandex Market's chain.
+
+        Regression test for the Important finding in the final whole-branch
+        review: the Critical defect ``test_apify_still_runs_after_browser_
+        exhausts_its_budget`` above already fixed once for a 2-source chain
+        was still live for Yandex Market's default 3-source chain
+        ``(public, browser, apify)`` -- ``marketplace_operation_timeout_sec``
+        had never been recalculated for a 3rd leg. With the production
+        defaults (``marketplace_retry_max_attempts=2``), PUBLIC and BROWSER
+        each retry to their full budget before failing -- exactly the
+        production retry behaviour, not a simplified one-attempt stand-in --
+        and Apify must still be invoked afterwards and be free to succeed.
+        """
+        settings = retry_settings()
+        clock = FakeClock()
+        per_source_timeout_sec = settings.marketplace_total_timeout_sec
+        max_attempts = settings.marketplace_retry_max_attempts
+        public = TimeConsumingSource(
+            SourceName.PUBLIC,
+            clock,
+            per_source_timeout_sec,
+            transport_error(SourceName.PUBLIC),
+        )
+        browser = TimeConsumingSource(
+            SourceName.BROWSER,
+            clock,
+            per_source_timeout_sec,
+            transport_error(SourceName.BROWSER),
+        )
+        apify = StubSource(
+            SourceName.APIFY,
+            success(SourceName.APIFY, parsed_product()),
+        )
+        service, _ = make_service(
+            chain=(SourceName.PUBLIC, SourceName.BROWSER, SourceName.APIFY),
+            sources={
+                SourceName.PUBLIC: public,
+                SourceName.BROWSER: browser,
+                SourceName.APIFY: apify,
+            },
+            settings=settings,
+            sleep=RecordingSleep(),
+            clock=clock,
+        )
+
+        result = await service.parse_product(ProductRequest('9000001'))
+
+        self.assertEqual(max_attempts, len(public.requests))
+        self.assertEqual(max_attempts, len(browser.requests))
+        self.assertEqual([ProductRequest('9000001')], apify.requests)
+        self.assertEqual(SourceName.APIFY, result.selected_source)
+        self.assertEqual(SourceOutcome.SUCCESS, result.outcome)
+
     async def test_challenge_is_never_retried(self) -> None:
         browser = StubSource(
             SourceName.BROWSER,

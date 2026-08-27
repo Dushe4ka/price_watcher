@@ -5,6 +5,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+import httpx
+
 from src.marketplaces.contracts import (
     CategoryRequest,
     SourceName,
@@ -194,6 +196,29 @@ class SourceChainCompositionTests(unittest.TestCase):
 
         self.assertIsInstance(sources[SourceName.PUBLIC], YandexPublicSource)
         self.assertIsInstance(sources[SourceName.APIFY], ApifySource)
+
+    def test_public_source_receives_the_configured_total_timeout(
+        self,
+    ) -> None:
+        """``YandexPublicSource`` must honour ``marketplace_total_timeout_sec``
+        as its own per-invocation HTTP timeout.
+
+        Regression test for the compounding factor behind the Important
+        finding: the public source used to build its HTTP client with a
+        hardcoded ``httpx.Timeout`` regardless of configuration, so
+        ``config.py``'s own comment claiming every source honours this
+        setting as its per-invocation timeout was false for this source.
+        """
+        registry = _registry(
+            FakeManager(_ozon_page()),
+            marketplace_total_timeout_sec=20,
+        )
+
+        source = dict(registry.sources_for('yandex_market'))[
+            SourceName.PUBLIC
+        ]
+
+        self.assertEqual(httpx.Timeout(20.0), source._timeout)
 
     def test_disabled_public_adapter_is_used_for_ozon(self) -> None:
         registry = _registry(

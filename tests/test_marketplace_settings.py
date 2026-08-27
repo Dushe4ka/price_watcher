@@ -100,6 +100,7 @@ class MarketplaceSettingsTests(TestCase):
     ) -> None:
         settings = make_settings(
             marketplace_total_timeout_sec=300,
+            marketplace_retry_max_attempts=1,
             marketplace_operation_timeout_sec=900,
             marketplace_max_content_bytes=10_485_760,
         )
@@ -139,13 +140,22 @@ class MarketplaceSettingsTests(TestCase):
     def test_operation_timeout_must_exceed_the_per_source_timeout(
         self,
     ) -> None:
+        """The plain ``operation > total`` invariant, isolated from chain
+        length.
+
+        ``marketplace_retry_max_attempts=1`` pins the worst-case-chain
+        invariant (see ``test_operation_timeout_must_cover_the_longest_
+        chain_worst_case`` below) at ``3 * 1 * 30 == 90``, so 91 exercises
+        only the plain ``operation > total`` rule this test targets.
+        """
         settings = make_settings(
             marketplace_total_timeout_sec=30,
-            marketplace_operation_timeout_sec=31,
+            marketplace_retry_max_attempts=1,
+            marketplace_operation_timeout_sec=91,
         )
 
         self.assertEqual(30, settings.marketplace_total_timeout_sec)
-        self.assertEqual(31, settings.marketplace_operation_timeout_sec)
+        self.assertEqual(91, settings.marketplace_operation_timeout_sec)
 
         with self.assertRaisesRegex(
             ValidationError,
@@ -153,6 +163,7 @@ class MarketplaceSettingsTests(TestCase):
         ):
             make_settings(
                 marketplace_total_timeout_sec=30,
+                marketplace_retry_max_attempts=1,
                 marketplace_operation_timeout_sec=30,
             )
         with self.assertRaisesRegex(
@@ -161,8 +172,76 @@ class MarketplaceSettingsTests(TestCase):
         ):
             make_settings(
                 marketplace_total_timeout_sec=30,
+                marketplace_retry_max_attempts=1,
                 marketplace_operation_timeout_sec=29,
             )
+
+    def test_operation_timeout_must_cover_the_longest_chain_worst_case(
+        self,
+    ) -> None:
+        """Regression test for the Important finding on the 3-source chain.
+
+        ``marketplace_operation_timeout_sec`` must cover every source in
+        the longest configured chain (Yandex Market's default 3-source
+        ``public,browser,apify``) retried up to
+        ``marketplace_retry_max_attempts`` times, each consuming its full
+        ``marketplace_total_timeout_sec`` budget -- not merely exceed the
+        per-source timeout by any positive margin. The bound is read from
+        the real ``marketplace_retry_max_attempts`` value, not a
+        hardcoded assumption, so tightening or loosening the retry budget
+        changes the required minimum accordingly.
+        """
+        settings = make_settings(
+            marketplace_total_timeout_sec=30,
+            marketplace_retry_max_attempts=2,
+            marketplace_operation_timeout_sec=180,
+        )
+
+        self.assertEqual(180, settings.marketplace_operation_timeout_sec)
+
+        with self.assertRaisesRegex(
+            ValidationError,
+            'must cover the worst case of the longest configured chain',
+        ):
+            make_settings(
+                marketplace_total_timeout_sec=30,
+                marketplace_retry_max_attempts=2,
+                marketplace_operation_timeout_sec=179,
+            )
+
+        # The bound tracks the actually configured retry budget: dropping
+        # to a single attempt per source halves the requirement.
+        settings = make_settings(
+            marketplace_total_timeout_sec=30,
+            marketplace_retry_max_attempts=1,
+            marketplace_operation_timeout_sec=90,
+        )
+
+        self.assertEqual(90, settings.marketplace_operation_timeout_sec)
+
+        with self.assertRaisesRegex(
+            ValidationError,
+            'must cover the worst case of the longest configured chain',
+        ):
+            make_settings(
+                marketplace_total_timeout_sec=30,
+                marketplace_retry_max_attempts=1,
+                marketplace_operation_timeout_sec=89,
+            )
+
+    def test_default_operation_timeout_covers_the_default_worst_case(
+        self,
+    ) -> None:
+        """The shipped default must itself satisfy the strengthened bound."""
+        settings = make_settings()
+
+        self.assertEqual(30, settings.marketplace_total_timeout_sec)
+        self.assertEqual(2, settings.marketplace_retry_max_attempts)
+        self.assertEqual(200, settings.marketplace_operation_timeout_sec)
+        self.assertGreaterEqual(
+            settings.marketplace_operation_timeout_sec,
+            3 * 2 * settings.marketplace_total_timeout_sec,
+        )
 
     def test_secret_values_are_redacted_in_settings_and_validation_errors(
         self,
