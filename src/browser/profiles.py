@@ -153,7 +153,7 @@ class BrowserSessionManager:
             validate_single_browser_worker()
             await session.close_if_idle()
             context = await session.ensure_context()
-            page = await context.new_page()
+            page = await _open_page_with_recovery(session, context)
             page_guard = _LeasePageGuard(page, marketplace)
             body_failed = False
             try:
@@ -230,6 +230,32 @@ class BrowserSessionManager:
     ) -> None:
         async with self._locks[marketplace]:
             await session.close()
+
+
+async def _open_page_with_recovery(
+    session: PersistentBrowserSession,
+    context: BrowserContextLike,
+) -> PageLike:
+    """Open a page, self-healing once if the cached context died externally.
+
+    A session's own bookkeeping only learns a context is gone when the
+    session itself closes it. If the real browser process behind that
+    cached context dies for an external reason between two leases (crash,
+    kill, or any other out-of-band closure), ``new_page()`` is the first
+    call to notice: it raises. Treat that as proof the cached context is
+    unusable, force the session to discard it, and retry exactly once
+    against a genuinely fresh context. A second failure is a real problem
+    and propagates unchanged to the existing transport-error handling.
+    """
+    try:
+        return await context.new_page()
+    except Exception:
+        try:
+            await session.close()
+        except Exception:
+            pass
+        context = await session.ensure_context()
+        return await context.new_page()
 
 
 class _LeasePageGuard:

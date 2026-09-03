@@ -68,6 +68,7 @@ class FakeContext:
         self,
         with_initial_page: bool = False,
         close_failures: int = 0,
+        new_page_failures: int = 0,
     ) -> None:
         self.pages = [FakePage()] if with_initial_page else []
         self.created_pages: list[FakePage] = []
@@ -75,8 +76,17 @@ class FakeContext:
         self.init_scripts: list[str] = []
         self.close_failures = close_failures
         self.close_calls = 0
+        self.new_page_failures = new_page_failures
+        self.new_page_calls = 0
 
     async def new_page(self) -> FakePage:
+        self.new_page_calls += 1
+        if self.new_page_failures:
+            self.new_page_failures -= 1
+            raise RuntimeError(
+                'BrowserContext.new_page: Target page, context or '
+                'browser has been closed',
+            )
         page = FakePage()
         self.pages.append(page)
         self.created_pages.append(page)
@@ -101,6 +111,7 @@ class FakeSession:
         *,
         close_failures: int = 0,
         close_release: asyncio.Event | None = None,
+        next_context: FakeContext | None = None,
     ) -> None:
         self.context = FakeContext()
         self.close_if_idle_calls = 0
@@ -110,6 +121,7 @@ class FakeSession:
         self.close_failures = close_failures
         self.close_started = asyncio.Event()
         self.close_release = close_release
+        self._next_context = next_context
 
     async def ensure_context(self) -> FakeContext:
         self.ensure_context_calls += 1
@@ -130,6 +142,9 @@ class FakeSession:
             self.close_failures -= 1
             raise RuntimeError('synthetic session close failure')
         await self.context.close()
+        if self._next_context is not None:
+            self.context = self._next_context
+            self._next_context = None
 
 
 class BrowserSessionManagerTests(unittest.IsolatedAsyncioTestCase):
@@ -217,6 +232,53 @@ class BrowserSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         await manager.close()
         self.assertTrue(session.context.closed)
         self.assertEqual(1, session.close_calls)
+
+    async def test_lease_recovers_once_from_externally_closed_context(
+        self,
+    ) -> None:
+        stale_context = FakeContext(new_page_failures=5)
+        fresh_context = FakeContext()
+        session = FakeSession(next_context=fresh_context)
+        session.context = stale_context
+        manager = BrowserSessionManager({'ozon': session})
+
+        async with manager.lease('ozon') as page:
+            self.assertFalse(page.closed)
+
+        self.assertEqual(1, session.close_calls)
+        self.assertEqual(2, session.ensure_context_calls)
+        self.assertIs(session.context, fresh_context)
+        self.assertEqual(1, stale_context.new_page_calls)
+        self.assertEqual(1, fresh_context.new_page_calls)
+        self.assertEqual(0, len(stale_context.created_pages))
+        self.assertEqual(1, len(fresh_context.created_pages))
+
+    async def test_lease_reports_repeated_new_page_failure(self) -> None:
+        stale_context = FakeContext(new_page_failures=5)
+        fresh_context = FakeContext(new_page_failures=5)
+        session = FakeSession(next_context=fresh_context)
+        session.context = stale_context
+        manager = BrowserSessionManager({'ozon': session})
+
+        with self.assertRaisesRegex(RuntimeError, 'has been closed'):
+            async with manager.lease('ozon'):
+                pass
+
+        self.assertEqual(1, session.close_calls)
+        self.assertEqual(2, session.ensure_context_calls)
+        self.assertEqual(1, stale_context.new_page_calls)
+        self.assertEqual(1, fresh_context.new_page_calls)
+
+    async def test_lease_happy_path_does_not_trigger_recovery(self) -> None:
+        session = FakeSession()
+        manager = BrowserSessionManager({'ozon': session})
+
+        async with manager.lease('ozon') as page:
+            self.assertFalse(page.closed)
+
+        self.assertEqual(0, session.close_calls)
+        self.assertEqual(1, session.ensure_context_calls)
+        self.assertEqual(1, session.context.new_page_calls)
 
     async def test_popup_is_closed(self) -> None:
         manager = BrowserSessionManager({'ozon': FakeSession()})
