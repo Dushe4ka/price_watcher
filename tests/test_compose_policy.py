@@ -93,6 +93,19 @@ class ProductionComposePolicyTests(unittest.TestCase):
             with self.subTest(service=name):
                 self.assertIn('shm_size', compose['services'][name])
 
+    def test_browser_services_raise_the_open_file_descriptor_limit(
+        self,
+    ) -> None:
+        """Docker's 1024 default is too low for a headed Chromium — a live
+        run against a real page showed the CDP `Target.createTarget` call
+        failing outright once the container's fd usage climbed."""
+        compose = render_compose(PRODUCTION_COMPOSE_FILE)
+        for name in ('api', 'bot'):
+            with self.subTest(service=name):
+                nofile = compose['services'][name]['ulimits']['nofile']
+                self.assertGreaterEqual(nofile['soft'], 65536)
+                self.assertGreaterEqual(nofile['hard'], 65536)
+
     def test_browser_services_apply_the_playwright_seccomp_profile(
         self,
     ) -> None:

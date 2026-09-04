@@ -253,6 +253,14 @@ def _check_hardening(services: Mapping[str, Any]) -> Iterable[str]:
             yield f'service {name!r} must run as a non-root user'
         if not service.get('shm_size'):
             yield f'service {name!r} must size /dev/shm for Chromium'
+        nofile = service.get('ulimits', {}).get('nofile', {})
+        if not isinstance(nofile, dict) or (
+            nofile.get('soft', 0) < 65536 or nofile.get('hard', 0) < 65536
+        ):
+            yield (
+                f'service {name!r} must raise the open-file ulimit for '
+                'Chromium (nofile soft/hard >= 65536)'
+            )
         options = [str(entry) for entry in service.get('security_opt', [])]
         if not any(
             option.startswith('seccomp') and SECCOMP_PROFILE_FILE in option

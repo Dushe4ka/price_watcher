@@ -52,6 +52,7 @@ Do not hand-edit this file. Re-copy it from the pinned upstream tag when
 | `ENTRYPOINT ["tini", "--"]` | Playwright recommends a real init to reap the zombie processes Chromium leaves behind. It is also load-bearing for `xvfb-run`, whose wait-for-Xvfb handshake relies on ordinary signal delivery and hangs forever when it is itself PID 1. |
 | `xvfb-run -a …` | The marketplace sessions run headed; Xvfb gives them a display without a monitor. |
 | `shm_size: 1gb` | Chromium crashes with out-of-memory renderer errors on Docker's 64 MB default `/dev/shm`. Playwright's own recommendation is `--ipc=host`; `shm_size` achieves the same for these workloads without sharing the host IPC namespace. |
+| `ulimits.nofile: 65536` | Docker's 1024 default open-file limit is too low for a headed Chromium. Confirmed live: on a real end-to-end run against a real marketplace page, the CDP `Target.createTarget` call started failing outright ("Failed to open a new tab") as the container's open-file count climbed under repeated real page loads — raising the container is not enough by itself for this, the container's own ulimit has to move too. |
 | `user: "10001:10001"` | Non-root is a precondition for the Chromium sandbox (above). |
 | `platform: linux/amd64` | See below. |
 

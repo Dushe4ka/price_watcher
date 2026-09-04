@@ -30,6 +30,14 @@ x-browser-runtime: &browser-runtime
   platform: linux/amd64
   user: "10001:10001"
   shm_size: 1gb
+  # Docker's 1024 default is too low for a headed Chromium: a real
+  # end-to-end run showed the CDP `Target.createTarget` call failing
+  # outright ("Failed to open a new tab") once the container's open-file
+  # count climbed under real page loads.
+  ulimits:
+    nofile:
+      soft: 65536
+      hard: 65536
   security_opt:
     - seccomp:./infra/playwright/seccomp_profile.json
 
