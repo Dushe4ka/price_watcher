@@ -865,10 +865,145 @@ class OzonBrowserSource(_BrowserSourceBase):
         return payload
 
 
+#: WB's own ("wbaas") self-resolving JS antibot check surfaces this exact
+#: HTTP status - not one of the generic statuses ``_raise_for_status``
+#: already recognizes.
+_WB_ANTIBOT_STATUS = 498
+
+#: Content markers unique to WB's antibot interstitial (captured verbatim
+#: from a real navigation). The status code alone is not a safe signature -
+#: any one of these substrings appearing in the page body confirms it.
+_WB_ANTIBOT_MARKERS = (
+    '/__wbaas/challenges/antibot/',
+    'wait_msg',
+    'challenge-solver',
+)
+
+#: Default cadence for polling whether WB's self-resolving check has
+#: cleared. This is a poll interval, not a timeout: the actual bound on how
+#: long polling continues is always the caller's shared ``OperationDeadline``.
+_WB_DEFAULT_ANTIBOT_POLL_INTERVAL_SEC = 0.5
+
+#: ``_complete_operation`` unconditionally discards a result that is still
+#: being produced at (or after) ``deadline.expires_at``, racing it against
+#: its own independently-scheduled timer on the exact same instant. Giving
+#: up only once fewer than one poll interval remains left that race for
+#: real-world scheduler jitter to win at random. Reserving this floor - on
+#: top of, never instead of, the poll interval - keeps "give up now" a
+#: deterministic decision against the same shared deadline, not a new bound.
+_WB_ANTIBOT_GIVE_UP_MARGIN_SEC = 0.05
+
+
 class WildberriesBrowserSource(_BrowserSourceBase):
     """Wildberries source using the canonical bounded DOM extraction JS."""
 
     marketplace: MarketplaceName = 'wildberries'
+
+    def __init__(
+        self,
+        manager: BrowserManagerLike,
+        coordinator: ChallengeCoordinator,
+        *,
+        category_urls: Mapping[str, str] | None = None,
+        total_timeout_sec: float | None = None,
+        max_content_bytes: int | None = None,
+        clock: Clock = time.monotonic,
+        antibot_poll_interval_sec: float = (
+            _WB_DEFAULT_ANTIBOT_POLL_INTERVAL_SEC
+        ),
+    ) -> None:
+        super().__init__(
+            manager,
+            coordinator,
+            category_urls=category_urls,
+            total_timeout_sec=total_timeout_sec,
+            max_content_bytes=max_content_bytes,
+            clock=clock,
+        )
+        if (
+            not math.isfinite(antibot_poll_interval_sec)
+            or antibot_poll_interval_sec <= 0
+        ):
+            raise ValueError(
+                'antibot_poll_interval_sec must be finite and positive',
+            )
+        self._antibot_poll_interval_sec = antibot_poll_interval_sec
+
+    async def _navigate(
+        self,
+        page: PageLike,
+        url: str,
+        deadline: OperationDeadline,
+        state: _OperationState,
+    ) -> int:
+        status = await super()._navigate(page, url, deadline, state)
+        if status != _WB_ANTIBOT_STATUS:
+            return status
+        html = await self._html(page, deadline, state)
+        if not _has_wb_antibot_markers(html):
+            return status
+        return await self._wait_out_wb_antibot(page, url, deadline, state)
+
+    async def _wait_out_wb_antibot(
+        self,
+        page: PageLike,
+        url: str,
+        deadline: OperationDeadline,
+        state: _OperationState,
+    ) -> int:
+        """Poll WB's self-resolving antibot check until clear or expired.
+
+        This is WB's own ("wbaas") JS-driven "Checking your browser..."
+        interstitial - not a third-party CAPTCHA widget, so
+        ``ChallengeCoordinator`` correctly never sees it. A real headed
+        browser clears it on its own within a few seconds; re-navigating to
+        the exact same, already-validated ``url`` surfaces that once it
+        does. Bounded entirely by the shared ``deadline`` - never by a
+        separate timeout - and cooperatively cancellable like every other
+        wait in this class, via ``_bounded``.
+
+        ``_complete_operation`` unconditionally treats any operation that is
+        still running at (or past) ``deadline.expires_at`` as a raw timeout,
+        discarding whatever result the operation produced. So this loop must
+        never let a poll round straddle that instant: like
+        ``SourceRetryExecutor.run``, it checks *before* starting another
+        round whether there is genuinely enough of the shared budget left,
+        and gives up with ``CHALLENGE`` a little early rather than racing
+        the deadline and losing that outcome to a misleading raw timeout.
+        """
+        give_up_threshold = max(
+            self._antibot_poll_interval_sec,
+            _WB_ANTIBOT_GIVE_UP_MARGIN_SEC,
+        )
+        try:
+            while True:
+                remaining = deadline.expires_at - self._clock()
+                if remaining <= give_up_threshold:
+                    raise _wb_antibot_unresolved()
+                await self._bounded(
+                    page,
+                    deadline,
+                    state,
+                    lambda: page.wait_for_timeout(
+                        self._antibot_poll_interval_sec * 1000,
+                    ),
+                )
+                status = await super(
+                    WildberriesBrowserSource,
+                    self,
+                )._navigate(page, url, deadline, state)
+                if status != _WB_ANTIBOT_STATUS:
+                    return status
+                html = await self._html(page, deadline, state)
+                if not _has_wb_antibot_markers(html):
+                    return status
+        except _SourceFailure as exc:
+            if (
+                exc.outcome is SourceOutcome.TRANSPORT_ERROR
+                and exc.error_code is SafeErrorCode.TIMEOUT
+            ):
+                raise _wb_antibot_unresolved() from None
+            raise
 
     async def _execute_category(
         self,
@@ -1310,6 +1445,17 @@ def _raise_for_status(
         )
     if status < 200 or status >= 300:
         raise _parse_drift()
+
+
+def _has_wb_antibot_markers(html: str) -> bool:
+    return any(marker in html for marker in _WB_ANTIBOT_MARKERS)
+
+
+def _wb_antibot_unresolved() -> _SourceFailure:
+    return _SourceFailure(
+        SourceOutcome.CHALLENGE,
+        SafeErrorCode.CHALLENGE_DETECTED,
+    )
 
 
 def _require_items(state: ValidationState) -> None:

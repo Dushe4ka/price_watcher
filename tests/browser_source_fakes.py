@@ -144,6 +144,44 @@ class SequenceEvaluationPage(FakePage):
         return self.evaluations.pop(0)
 
 
+class SequencedStatusPage(FakePage):
+    """Scripts status/HTML across repeated ``goto`` calls to the same URL.
+
+    Models a self-resolving check: each successive navigation (including a
+    poll-driven reload of the exact same URL) can hand back a different
+    status/body pair, so a caller polling by re-navigating observes the
+    scripted sequence in order and then holds on the last entry.
+    """
+
+    def __init__(
+        self,
+        *,
+        statuses: list[int],
+        htmls: list[str],
+        evaluation: object = None,
+    ) -> None:
+        super().__init__(html=htmls[0], evaluation=evaluation)
+        self._statuses = list(statuses)
+        self._htmls = list(htmls)
+        self.goto_calls = 0
+
+    async def goto(
+        self,
+        url: str,
+        *,
+        wait_until: str,
+        timeout: float,
+    ) -> FakeNavigationResponse:
+        del wait_until
+        self.goto_urls.append(url)
+        self.goto_timeouts.append(timeout)
+        self.url = url
+        index = min(self.goto_calls, len(self._statuses) - 1)
+        self.html = self._htmls[min(self.goto_calls, len(self._htmls) - 1)]
+        self.goto_calls += 1
+        return FakeNavigationResponse(self._statuses[index])
+
+
 class HangingActionPage(FakePage):
     def __init__(self, *, action: str, html: str = 'unused') -> None:
         super().__init__(html=html)
