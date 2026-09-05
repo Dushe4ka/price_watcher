@@ -652,6 +652,28 @@ class WildberriesAntibotSelfResolveTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotEqual(SourceOutcome.PARSE_DRIFT, result.outcome)
 
+    async def test_status_498_without_markers_is_parse_drift_not_challenge(
+        self,
+    ) -> None:
+        page = FakePage(
+            html='<html>unrelated upstream response</html>',
+            status=498,
+        )
+        source = WildberriesBrowserSource(
+            FakeManager(page),
+            FakeCoordinator(),
+        )
+
+        result = await source.parse_product(ProductRequest('920001'))
+
+        self.assertEqual(SourceOutcome.PARSE_DRIFT, result.outcome)
+        self.assertEqual(
+            SafeErrorCode.PARSE_DRIFT,
+            result.attempt.error_code,
+        )
+        self.assertNotEqual(SourceOutcome.CHALLENGE, result.outcome)
+        self.assertEqual(1, len(page.goto_urls))
+
     async def test_unrelated_non_2xx_statuses_are_unaffected(self) -> None:
         cases = (
             (418, SourceOutcome.PARSE_DRIFT, SafeErrorCode.PARSE_DRIFT),
