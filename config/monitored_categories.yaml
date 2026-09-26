@@ -56,6 +56,8 @@ categories:
         crawl_url: /category/odezhda-7500/
       - marketplace: wildberries
         crawl_url: https://www.wildberries.ru/catalog/zhenshchinam/odezhda
+      - marketplace: wildberries
+        crawl_url: https://www.wildberries.ru/catalog/muzhchinam/odezhda
       - marketplace: yandex_market
         crawl_url: https://market.yandex.ru/category/odezhda-dlya-vzroslykh
 
@@ -68,6 +70,8 @@ categories:
         crawl_url: /category/obuv-17777/
       - marketplace: wildberries
         crawl_url: https://www.wildberries.ru/catalog/obuv/muzhskaya
+      - marketplace: wildberries
+        crawl_url: https://www.wildberries.ru/catalog/obuv/zhenskaya
       - marketplace: yandex_market
         crawl_url: https://market.yandex.ru/category/obuv-dlya-vzroslykh
 
